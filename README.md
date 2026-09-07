@@ -126,6 +126,44 @@ La documentazione completa è in [docs/](docs/) (in inglese, come il codice):
   il limite di 4096 caratteri di Telegram; un error handler globale trasforma qualunque
   eccezione (Home Assistant irraggiungibile compreso) in un messaggio all'utente.
 
+## Docker
+
+L'immagine ufficiale è [`lordraw/hassgram`](https://hub.docker.com/r/lordraw/hassgram)
+(`linux/amd64`, `arm64`, `arm/v7`). Non espone porte e non usa volumi: il bot fa
+solo connessioni in uscita e non tiene niente su disco.
+
+```bash
+docker run -d --name hassgram --restart unless-stopped \
+  --env-file .env lordraw/hassgram:latest
+```
+
+Oppure con compose, partendo da [docker-compose.yml](docker-compose.yml):
+
+```bash
+cp .env.example .env   # e riempilo
+docker compose up -d
+```
+
+### Build e pubblicazione
+
+Il [Makefile](Makefile) prende la versione da git, quindi un tag `:X.Y.Z` su
+Docker Hub corrisponde sempre a un tag git:
+
+| comando | cosa fa |
+|---|---|
+| `make build` | costruisce l'immagine locale, taggata `:<versione>` e `:latest` |
+| `make run` | la costruisce e la avvia con il `.env` locale |
+| `make push` | pubblica `:latest` multi-arch |
+| `make release` | pubblica `:<tag git>` e `:latest`; fallisce se HEAD non è su un tag |
+| `make tag V=1.2.3` | crea e pusha il tag git, poi fa `release` |
+| `make version` | mostra cosa pubblicherebbe questo checkout |
+
+`make push` e `make release` usano `docker buildx` (il builder viene creato al
+volo) e richiedono un `docker login`, disponibile anche come `make login`.
+
+La descrizione da incollare su Docker Hub — overview lunga e short description —
+sta in [DOCKERHUB.md](DOCKERHUB.md).
+
 ## Esecuzione come servizio
 
 ```bash
