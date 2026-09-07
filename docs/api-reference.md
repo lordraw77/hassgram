@@ -113,7 +113,14 @@ and the single exception type every failure is mapped to.
 
 ### `class HomeAssistantError`
 
-Raised for every failure while talking to Home Assistant.
+Raised for every failure while talking to Home Assistant. Carries the failure
+*structured* — `kind` (`network`, `http`, `stt`, `generic`), `status` and `detail` —
+rather than a ready-made sentence: this module does not know which language the
+chat is speaking. `bot.ha_error_text` turns it into the localised line.
+
+| Signature | Summary |
+|---|---|
+| `__init__(detail: str, kind: str = 'generic', status: int \| None = None)` | Build the error. |
 
 ### `class HomeAssistantClient`
 
@@ -128,7 +135,6 @@ Async facade over the subset of the Home Assistant REST API that Hassgram uses.
 | `async ping() -> str` | Check that the instance is reachable and the token is accepted. |
 | `async states(max_age: float = 5.0) -> list[dict[str, Any]]` | Return every entity state, served from a short-lived cache. |
 | `invalidate_states() -> None` | Drop the cached snapshot so the next `states` call refetches. |
-| `async state(entity_id: str) -> dict[str, Any]` | Fetch a single entity's state, bypassing the cache. |
 | `async render_template(template: str) -> str` | Render a Jinja template inside Home Assistant and return its output. |
 | `async call_service(domain: str, service: str, data: dict[str, Any]) -> Any` | Invoke a Home Assistant service and invalidate the state cache. |
 | `async stt_entities() -> list[str]` | List the speech-to-text entities exposed by Home Assistant. |
@@ -225,6 +231,10 @@ Stateful holder for the bot's handlers.
 
 | Signature | Summary |
 |---|---|
+| `_lights(states: list[dict[str, Any]], areas: dict[str, str] \| None = None, area: str \| None = None, domains: tuple[str, ...] = ('light',)) -> list[dict[str, Any]]` | Select the lighting entities out of a full state snapshot. |
+| `_temp_sensors(states: list[dict[str, Any]], areas: dict[str, str] \| None = None, area: str \| None = None) -> list[dict[str, Any]]` | Select the temperature and humidity sensors out of a state snapshot. |
+| `_remember_lang(update: Update, lang: str) -> None` | Record the language a chat is speaking, keeping the store bounded. |
+| `async _lights_browse(update: Update, query: str, lang: str, overview_on_miss: bool = False) -> None` | Show the light browser: an overview, or the lights matching a query. |
 | `async _lights_on(update: Update, lang: str) -> None` | List every light that is currently on, grouped by room. |
 | `async _switch(update: Update, query: str, turn_on: bool, lang: str) -> None` | Resolve what the user meant and turn it on or off. |
 | `_bulk_targets(lights: list[dict[str, Any]], areas: dict[str, str], area: str \| None = None) -> list[dict[str, Any]]` | Select the lights a bulk operation should act on. |
@@ -236,11 +246,12 @@ Stateful holder for the bot's handlers.
 | `_area_name(name: str, lang: str) -> str` | Render a grouping key from `entities.group_by_area` for display. |
 | `_match_area(query: str, areas: dict[str, str]) -> str \| None` | Match a query against the names of the rooms that exist. |
 | `_areas_summary(lights: list[dict[str, Any]], areas: dict[str, str], lang: str) -> str` | Render the "N on out of M" overview that heads the light browser. |
-| `_areas_keyboard(states: list[dict[str, Any]], areas: dict[str, str], lang: str = i18n.DEFAULT_LANG, prefix: str = 'area') -> InlineKeyboardMarkup` | Build a keyboard of rooms, two buttons per row. |
+| `_areas_keyboard(states: list[dict[str, Any]], areas: dict[str, str], prefix: str = 'area') -> InlineKeyboardMarkup` | Build a keyboard of rooms, two buttons per row. |
 | `_lights_text(title: str, lights: list[dict[str, Any]], lang: str) -> str` | Render a list of lights with their state. |
 | `_lights_keyboard(lights: list[dict[str, Any]], lang: str = i18n.DEFAULT_LANG) -> InlineKeyboardMarkup` | Build a toggle keyboard for a list of lights. |
+| `async _resolve_token(query, token: str, lang: str) -> str \| None` | Resolve a `callback_data` token, answering the query when it is gone. |
 | `async _handle_callback(query, data: str, lang: str = i18n.DEFAULT_LANG) -> None` | Route a callback query to its action. |
 | `async _refresh_message(query, ids: list[str], lang: str = i18n.DEFAULT_LANG) -> None` | Re-read the given entities and rewrite the message in place. |
-| `async _dispatch_text(update: Update, text: str, spoken: bool = False) -> None` | Interpret an Italian sentence and run the command it describes. |
+| `async _dispatch_text(update: Update, text: str, spoken: bool = False) -> None` | Interpret a sentence and run the command it describes. |
 | `_audio_format(mime_type: str \| None) -> tuple[str, str]` | Derive the container and codec to declare for a Telegram clip. |
 

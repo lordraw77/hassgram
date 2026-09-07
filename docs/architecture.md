@@ -29,7 +29,9 @@ The four modules are layered, and the dependency arrows only point one way.
   part of the codebase that can be exercised without a running instance. It
   reaches into `i18n` only to name entity states.
 - **`ha_client.py`** knows nothing about Telegram. It is the only place that
-  performs I/O and the only place that raises `HomeAssistantError`.
+  performs I/O and the only place that raises `HomeAssistantError` — which it
+  raises *structured* (`kind`, `status`, `detail`), because it cannot know which
+  language to phrase the failure in. `bot.ha_error_text` does the phrasing.
 - **`bot.py`** depends on all three and is the only module that imports
   `python-telegram-bot`.
 
@@ -72,9 +74,11 @@ everything below the parser is shared between Italian and English:
 
 The resolved language is remembered per chat, because three kinds of input carry
 no language of their own: button taps, voice messages, and errors raised before
-anything was parsed. It lives in a plain dict and is therefore lost on restart,
-like the callback tokens — a chat falls back to `BOT_LANGUAGE` until its next
-recognisable message.
+anything was parsed. It lives in a bounded LRU (`MAX_CHAT_LANGS`) written only by
+`HassBot._remember_lang`, and is lost on restart like the callback tokens — a
+chat falls back to `BOT_LANGUAGE` until its next recognisable message. The cap
+matters because with an empty allow-list any stranger can otherwise add an entry
+per chat to a process that runs for months.
 
 The full rules, including why English has to check "which lights are on" before
 "turn on", are in [languages.md](languages.md).

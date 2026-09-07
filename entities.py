@@ -31,8 +31,9 @@ Vocabulary used throughout the module:
     Home Assistant side and is the only link between an entity and its room.
     Entities with no area are simply absent from the mapping.
 
-User-facing strings returned by this module are Italian on purpose: they are
-sent verbatim to Telegram, which is an Italian-language bot.
+This module writes no user-facing text of its own: the few strings it returns
+that reach the user -- state words, the "no room" label -- come from
+:func:`i18n.t` and follow the conversation's language.
 """
 
 from __future__ import annotations
@@ -230,7 +231,7 @@ def search(
 
     Args:
         query: Free text, typically what is left of a sentence after the verbs and
-            articles have been stripped by ``HassBot._strip_verbs``.
+            articles have been stripped by :func:`i18n.strip_filler`.
         states: The pool of entities to search, usually already restricted to a
             domain by the caller.
         areas: Mapping ``entity_id -> area name``, used for the third haystack and

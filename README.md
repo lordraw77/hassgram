@@ -29,6 +29,15 @@ pip install -r requirements.txt
 python3 bot.py
 ```
 
+## Test
+
+```bash
+python3 -m unittest discover
+```
+
+L'intera suite, senza dipendenze aggiuntive: niente rete, niente Telegram,
+niente Home Assistant. Dettagli in [docs/development.md](docs/development.md#testing).
+
 ## Comandi
 
 | comando | cosa fa |

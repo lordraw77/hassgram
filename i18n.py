@@ -117,6 +117,10 @@ MESSAGES: dict[str, dict[str, str]] = {
         "it": "Uso: <code>/{command} nome luce o stanza</code>",
         "en": "Usage: <code>/{command} light or room name</code>",
     },
+    # The command names themselves are localised: the usage hint has to name the
+    # command the user actually typed, and /accendi and /on are the same handler.
+    "command_on": {"it": "accendi", "en": "on"},
+    "command_off": {"it": "spegni", "en": "off"},
     "verb_on": {"it": "accendere", "en": "turn on"},
     "verb_off": {"it": "spegnere", "en": "turn off"},
     "nothing_to_switch": {
@@ -214,6 +218,22 @@ MESSAGES: dict[str, dict[str, str]] = {
     },
     "transcribed": {"it": "🎙 <i>«{text}»</i>", "en": "🎙 <i>“{text}”</i>"},
     # --- errors
+    # Detail lines for a HomeAssistantError, chosen by its ``kind``. They are
+    # interpolated into "ha_down" / "stt_failed" as {error}, which is why they
+    # carry no icon and no markup of their own.
+    "ha_error_network": {
+        "it": "Rete non raggiungibile: {detail}",
+        "en": "Network unreachable: {detail}",
+    },
+    "ha_error_http": {
+        "it": "Home Assistant ha risposto {status}: {detail}",
+        "en": "Home Assistant answered {status}: {detail}",
+    },
+    "ha_error_stt": {
+        "it": "Il motore di trascrizione ha rifiutato l'audio: {detail}",
+        "en": "The transcription engine rejected the audio: {detail}",
+    },
+    "ha_error_generic": {"it": "{detail}", "en": "{detail}"},
     "ha_down": {
         "it": "⚠️ Home Assistant non risponde.\n<i>{error}</i>",
         "en": "⚠️ Home Assistant is not responding.\n<i>{error}</i>",
@@ -283,18 +303,20 @@ def t(lang: str, key: str, **kwargs: object) -> str:
 # --------------------------------------------------------------- detection
 
 # Words that only occur in one of the two languages. Deliberately excludes
-# tokens the languages share ("in", "studio", room names), which would add
-# noise without ever discriminating.
+# tokens the languages share -- "in", "studio", room names, and "temperature",
+# which is spelled identically in both and therefore only ever cancels itself
+# out. A shared marker adds noise without ever discriminating; the intent
+# patterns in RULES still match it, they just do not vote on the language.
 MARKERS: dict[str, str] = {
     "it": (
         r"\b(accendi|accende|accendere|accesa|accese|acceso|attiva|attivare|spegni|spegnere|"
         r"spenta|spente|spento|disattiva|disattivare|luci|luce|lampada|lampade|temperatura|"
-        r"temperature|gradi|umidita|caldo|freddo|stanza|stanze|casa|appartamento|ovunque|"
+        r"gradi|umidita|caldo|freddo|stanza|stanze|casa|appartamento|ovunque|"
         r"tutta|tutte|tutti|tutto|della|dello|delle|dei|degli|nella|nello|quanti|quanto|"
         r"quale|quali|sono|adesso|dimmi|dammi|puoi|potresti|grazie|favore|che|cosa)\b"
     ),
     "en": (
-        r"\b(turn|switch|lights|light|lamp|lamps|temperature|degrees|warm|cold|hot|humidity|"
+        r"\b(turn|switch|lights|light|lamp|lamps|degrees|warm|cold|hot|humidity|"
         r"humid|room|rooms|house|home|apartment|flat|everything|everywhere|every|all|the|"
         r"what|whats|which|how|is|are|please|thanks|thank|you|can|could|would|tell|"
         r"anything|on|off|now|my)\b"

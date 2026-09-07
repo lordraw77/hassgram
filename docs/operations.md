@@ -105,7 +105,7 @@ back.
 1. `systemctl status hassgram` — is it running?
 2. `journalctl -u hassgram -n 50` — did it fail at startup? A missing variable
    exits with a message naming it.
-3. Restart loop with `Errore di rete verso Home Assistant`: the instance is
+3. Restart loop with `network: ...`: the instance is
    unreachable from this host. Check with
    `curl -s -H "Authorization: Bearer $TOKEN" $HOME_ASSISTANT_API_URL`.
 4. Nothing in the log at all when you message it: the bot may be polling with a
@@ -116,20 +116,22 @@ back.
 ### "⛔️ Non sei autorizzato a usare questo bot."
 
 Your chat id is not in `TELEGRAM_CHAT_ID`. The log line
-`Accesso negato per chat <id>` gives you the id to add. Group ids are negative.
+`Access denied for chat <id>` gives you the id to add. Group ids are negative.
 Restart after editing `.env` — configuration is read once at startup.
 
 ### "⚠️ Home Assistant non risponde."
 
-The global error handler saw a `HomeAssistantError`; the message carries the
-underlying cause.
+The global error handler saw a `HomeAssistantError`. The chat gets the cause
+localised by `bot.ha_error_text`; the log line carries the same cause in the
+raw `kind[ status]: detail` form.
 
-| Cause in the message | Meaning |
-|---|---|
-| `Errore di rete` | unreachable: instance down, wrong host, firewall |
-| `ha risposto 401` | token revoked or wrong |
-| `ha risposto 404` | wrong URL — the `/api/` suffix is required |
-| `ha risposto 500` | a Home Assistant integration is failing; check its own log |
+| In the log | In the chat | Meaning |
+|---|---|---|
+| `network: ...` | "Rete non raggiungibile" / "Network unreachable" | unreachable: instance down, wrong host, firewall |
+| `http 401: ...` | "…ha risposto 401" / "…answered 401" | token revoked or wrong |
+| `http 404: ...` | "…ha risposto 404" / "…answered 404" | wrong URL — the `/api/` suffix is required |
+| `http 500: ...` | "…ha risposto 500" / "…answered 500" | a Home Assistant integration is failing; check its own log |
+| `stt: ...` | "Il motore di trascrizione ha rifiutato l'audio" | the STT provider refused the clip; see [voice.md](voice.md) |
 
 ### Rooms are missing or wrong
 
@@ -205,7 +207,7 @@ configuration one.
   house. `chmod 600`, and never commit it (it is in `.gitignore`).
 - `TELEGRAM_CHAT_ID` is the **only** access control in the bot. Empty means
   anyone who finds the bot controls the house; the startup log warns about it.
-- Watch for `Accesso negato per chat` in the log. Repeated hits mean the bot has
+- Watch for `Access denied for chat` in the log. Repeated hits mean the bot has
   been found by someone else.
 - If the Home Assistant token leaks, revoke it in Home Assistant (Profile →
   Security → Long-lived access tokens), issue a new one, update `.env`, restart.

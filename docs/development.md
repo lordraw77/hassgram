@@ -47,65 +47,94 @@ To see the parser and keyboard decisions, raise the log level in
 
 ## Testing
 
-There is no test suite yet. The natural place to start is `entities.py`, which
-is pure and needs nothing but dictionaries, followed by the `HassBot` static
-helpers (`_is_home`, `_strip_verbs`, `_audio_format`, `_bulk_targets`) and the
-module-level `clip` / `tok` / `untok`.
-
-The examples in `normalize()` are doctests and already run:
+The suite lives in [`tests/`](../tests) and needs nothing the bot does not
+already need — it is written against `unittest`, so there is no test dependency
+to install:
 
 ```bash
-python3 -m doctest entities.py -v
+python3 -m unittest discover        # from the project root
+python3 -m unittest discover -v     # per-test names
+python3 -m unittest tests.test_bot_handlers.SwitchTest   # one class
 ```
 
-For handler-level tests, `HassBot` can be driven without Telegram or Home
-Assistant by passing a fake client and a fake update — the handlers only touch
-`update.effective_message.reply_text`, `update.effective_chat.id` and
-`message.chat.send_action`:
+pytest collects it too, if you prefer its output — the same tests either way:
 
-```python
-import asyncio, types
-from bot import HassBot
-
-STATES = [{"entity_id": "light.studio", "state": "off",
-           "attributes": {"friendly_name": "Luce studio"}}]
-AREAS = {"light.studio": "Studio"}
-
-class FakeHA:
-    def __init__(self): self.calls = []
-    async def states(self): return STATES
-    async def areas(self): return AREAS
-    async def call_service(self, d, s, data): self.calls.append((d, s, data["entity_id"]))
-    def invalidate_states(self): pass
-
-class FakeMessage:
-    def __init__(self): self.sent = []
-    async def reply_text(self, text, **kw): self.sent.append(text)
-
-def fake_update(chat_id=1):
-    return types.SimpleNamespace(effective_message=FakeMessage(),
-                                 effective_chat=types.SimpleNamespace(id=chat_id))
-
-ha = FakeHA()
-bot = HassBot(ha, {1})
-u = fake_update()
-asyncio.run(bot._dispatch_text(u, "accendi la luce dello studio"))
-assert ha.calls == [("light", "turn_on", ["light.studio"])]
-print(u.effective_message.sent[0])
+```bash
+python3 -m pytest tests -q
 ```
 
-Cases worth covering, because they encode decisions that are easy to break:
+| file | covers |
+|---|---|
+| [`tests/fakes.py`](../tests/fakes.py) | the sample house and the Telegram/Home Assistant fakes; no tests of its own |
+| [`tests/test_entities.py`](../tests/test_entities.py) | `normalize`, `label`, `is_on`, `search` scoring and ranking, `group_by_area` ordering |
+| [`tests/test_i18n.py`](../tests/test_i18n.py) | catalogue structure, `detect`, `normalize_lang`, `strip_filler`, both grammars |
+| [`tests/test_ha_client.py`](../tests/test_ha_client.py) | error mapping, both caches, the areas template, the STT header |
+| [`tests/test_bot_helpers.py`](../tests/test_bot_helpers.py) | `tok`/`untok` eviction, `clip`, `ha_error_text`, the selectors, the keyboards |
+| [`tests/test_bot_handlers.py`](../tests/test_bot_handlers.py) | every command, callback branch, the voice pipeline, `on_error`, and `main`'s wiring |
+
+`ha_client` is exercised through an `httpx.MockTransport` swapped into the live
+client, so the real base URL and the real `Authorization` header are asserted
+without opening a socket. Everything else runs against the fakes.
+
+### Doctests
+
+The examples in `entities.normalize()` and `i18n.parse()` are doctests and run
+as part of the suite (`tests/test_i18n.py::DoctestTest`). They are driven
+through `doctest.testmod` rather than the `load_tests` protocol, because pytest
+does not implement `load_tests` and would silently skip them. To run them alone:
+
+```bash
+python3 -m doctest entities.py i18n.py -v
+```
+
+### Three structural tests
+
+These fail on a mistake that would otherwise only surface in production:
+
+- **Every catalogue key used in the code exists.** `i18n.t` raises `KeyError` on
+  a missing key by design, so `test_every_key_the_code_asks_for_exists` parses
+  `bot.py`, `entities.py` and `i18n.py` for `t(lang, "…")` and `plural("…", n)`
+  and checks each one against `MESSAGES`.
+- **Every entry covers both languages and agrees on its placeholders**, and
+  renders without raising.
+- **The two marker lists do not overlap.** A word in both bumps both counters,
+  which `i18n.detect` resolves as a tie — it contributes nothing while looking
+  as though it does.
+
+### Cases that encode a decision
+
+These are the ones to check first after a change, because each pins a choice
+that is easy to undo by accident:
 
 - `unavailable` entities are excluded from bulk operations but still counted in
   the "N out of M" summary.
+- A bulk operation never touches a `switch`, so "turn the house off" cannot cut
+  power to the fridge.
 - `_is_home` matches exactly, never as a substring, in both languages.
-- `i18n.strip_filler("accendi tutto", "it")` and
-  `i18n.strip_filler("turn everything off", "en")` both return `"casa"`, not `""`.
-- `i18n.detect` leaves an ambiguous message on the chat's current language.
+- Targets resolve house → room → entity, so `/accendi studio` is a *room*
+  operation even when a light is also named "Studio".
 - `i18n.parse("which lights are on", "en")` is `lights_on`, not `on`.
-- `clip()` leaves `<b>` tags balanced.
-- An evicted token yields "sessione scaduta" rather than an exception.
-- Every callback branch answers the query, including unknown payloads.
+- `clip()` cuts on a line boundary, leaving `<b>` tags balanced.
+- An evicted token yields "sessione scaduta" rather than an exception, and every
+  callback branch answers the query — including unknown payloads.
+- No handler reads a state or remembers a language before `guard` has run.
+
+### Writing a new test
+
+Use the fixtures in `tests/fakes.py`: `house()` returns the sample
+installation, `FakeHA` records service calls, and `FakeUpdate` / `FakeQuery`
+carry only the attributes the handlers touch. A handler test is three lines:
+
+```python
+b = bot.HassBot(FakeHA(), set())
+update = FakeUpdate("/accendi salone")
+await b.cmd_on(update, context(args=["salone"]))
+assert b.ha.calls == [("light", "turn_on", [...])]
+```
+
+Derive async cases from `unittest.IsolatedAsyncioTestCase` (or from
+`BotTestCase` in `test_bot_handlers.py`, which also clears the process-global
+token store).
 
 ## Common changes
 

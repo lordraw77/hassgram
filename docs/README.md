@@ -21,6 +21,7 @@ answers in the same language, voice messages included. See
 | look up a module, class or function | [api-reference.md](api-reference.md) |
 | run it as a service, or fix a broken one | [operations.md](operations.md) |
 | change or extend it | [development.md](development.md) |
+| run or write tests | [development.md#testing](development.md#testing) |
 
 ## At a glance
 
@@ -33,7 +34,10 @@ answers in the same language, voice messages included. See
   language parser is a fixed set of regular expressions; transcription reuses
   the speech-to-text engine already configured inside Home Assistant.
 - **Stateless across restarts.** The only in-memory state is a cache of entity
-  states, the room mapping, and the callback-token LRU — all rebuilt on demand.
+  states, the room mapping, the remembered language per chat and the
+  callback-token LRU — all bounded, all rebuilt on demand.
+- **No test dependency.** `python3 -m unittest discover` runs the whole suite
+  against fakes: no network, no Telegram, no Home Assistant.
 
 ## Design constraints worth knowing
 

@@ -63,10 +63,36 @@ class HomeAssistantError(RuntimeError):
     they either handle the failure locally or let it reach the global error
     handler, which turns it into a message to the user.
 
-    The message is user-facing: it is shown in Telegram verbatim, and therefore
-    includes the HTTP status and a truncated response body when there is one.
+    The failure is carried *structured* rather than as a ready-made sentence: this
+    module has no idea which language the chat that triggered the request is
+    speaking, and the whole message catalogue lives in :mod:`i18n`. The exception's
+    own ``str()`` is English and meant for the log; ``bot.ha_error_text`` turns
+    ``kind``, ``status`` and ``detail`` into the localised line shown in Telegram.
+
+    Attributes:
+        kind: What went wrong, one of ``"network"`` (nothing answered),
+            ``"http"`` (an error response, ``status`` is set), ``"stt"`` (the
+            transcription engine refused the clip) or ``"generic"``. It selects
+            the ``ha_error_*`` catalogue key.
+        status: HTTP status code for ``kind == "http"``, otherwise ``None``.
+        detail: The variable part -- the transport error, the truncated response
+            body, the provider's rejection. Never translated: it comes from
+            httpx or from Home Assistant itself.
     """
-    pass
+
+    def __init__(self, detail: str, kind: str = "generic", status: int | None = None) -> None:
+        """Build the error.
+
+        Args:
+            detail: The variable part of the failure, used both in the log message
+                and in the localised text.
+            kind: Failure category; see the class docstring.
+            status: HTTP status code, when there is one.
+        """
+        super().__init__(f"{kind}{f' {status}' if status else ''}: {detail}")
+        self.kind = kind
+        self.status = status
+        self.detail = detail
 
 
 class HomeAssistantClient:
@@ -145,17 +171,18 @@ class HomeAssistantClient:
             ``POST /api/template`` with ``text/plain``.
 
         Raises:
-            HomeAssistantError: On any transport failure, and on any response with
-                status >= 400. The message carries the status code and the first 200
-                characters of the body -- enough to recognise an expired token or an
-                unknown entity without flooding a Telegram message.
+            HomeAssistantError: On any transport failure (``kind="network"``), and on
+                any response with status >= 400 (``kind="http"``, with ``status`` set
+                and ``detail`` holding the first 200 characters of the body -- enough
+                to recognise an expired token or an unknown entity without flooding a
+                Telegram message).
         """
         try:
             resp = await self._client.request(method, path, **kwargs)
         except httpx.HTTPError as exc:
-            raise HomeAssistantError(f"Errore di rete verso Home Assistant: {exc}") from exc
+            raise HomeAssistantError(str(exc), kind="network") from exc
         if resp.status_code >= 400:
-            raise HomeAssistantError(f"Home Assistant ha risposto {resp.status_code}: {resp.text[:200]}")
+            raise HomeAssistantError(resp.text[:200], kind="http", status=resp.status_code)
         if resp.headers.get("content-type", "").startswith("application/json"):
             return resp.json()
         return resp.text
@@ -219,24 +246,6 @@ class HomeAssistantClient:
         """
         self._states_cache = None
         self._states_cache_at = 0.0
-
-    async def state(self, entity_id: str) -> dict[str, Any]:
-        """Fetch a single entity's state, bypassing the cache.
-
-        Unused by the current command set -- the bot always filters a full snapshot --
-        but kept because it is the cheapest way to check one entity when debugging or
-        extending the bot.
-
-        Args:
-            entity_id: Full entity id, e.g. ``light.studio``.
-
-        Returns:
-            The state dictionary for that entity.
-
-        Raises:
-            HomeAssistantError: With a 404 in the message if the entity does not exist.
-        """
-        return await self._request("GET", f"/states/{entity_id}")
 
     async def render_template(self, template: str) -> str:
         """Render a Jinja template inside Home Assistant and return its output.
@@ -348,9 +357,10 @@ class HomeAssistantClient:
             error, it just means there is nothing to execute.
 
         Raises:
-            HomeAssistantError: If the request fails, or if the provider answers
-                without ``result == "success"`` (a rejected format, an unsupported
-                language, or an engine that is momentarily unavailable).
+            HomeAssistantError: If the request fails, or -- with ``kind="stt"`` -- if
+                the provider answers without ``result == "success"`` (a rejected
+                format, an unsupported language, or an engine that is momentarily
+                unavailable).
         """
         headers = {
             "X-Speech-Content": (
@@ -361,7 +371,7 @@ class HomeAssistantClient:
         }
         data = await self._request("POST", f"/stt/{entity_id}", content=audio, headers=headers)
         if not isinstance(data, dict) or data.get("result") != "success":
-            raise HomeAssistantError(f"Trascrizione fallita: {data}")
+            raise HomeAssistantError(str(data)[:200], kind="stt")
         return (data.get("text") or "").strip()
 
     async def stt_options(self, entity_id: str) -> dict[str, Any]:

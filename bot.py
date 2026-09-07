@@ -3,9 +3,9 @@
 Hassgram lets a small, trusted set of Telegram chats drive a Home Assistant
 installation by typing commands, speaking them, or tapping inline buttons. This
 module owns everything Telegram-shaped: handler registration, message
-formatting, inline keyboards, callback routing, voice transcription and the
-Italian natural-language parser. Domain logic lives in :mod:`entities` and all
-HTTP traffic in :mod:`ha_client`.
+formatting, inline keyboards, callback routing and voice transcription. Domain
+logic lives in :mod:`entities`, the message catalogue and the two grammars in
+:mod:`i18n`, and all HTTP traffic in :mod:`ha_client`.
 
 Request flow
 ------------
@@ -47,8 +47,12 @@ Failure handling
     is registered as the global error handler and turns any unhandled
     exception into a message to the user, so a failure is never silent.
 
-All strings shown to the user are Italian; code, comments and docstrings are
-English.
+Localisation
+    The bot answers in Italian or English, following the chat (see
+    :meth:`HassBot.resolve_lang`). No user-facing string is written in this
+    module: every one of them comes from :func:`i18n.t`, including the failure
+    lines built by :func:`ha_error_text` out of a :class:`ha_client.HomeAssistantError`.
+    Code, comments and docstrings are English.
 """
 
 from __future__ import annotations
@@ -89,6 +93,7 @@ MAX_BUTTONS = 24
 MAX_VOICE_BYTES = 5 * 1024 * 1024  # ~5 minutes of ogg/opus: past that it is almost certainly not a command
 MAX_MESSAGE_CHARS = 4000  # Telegram stops at 4096: leave room for the truncation notice
 MAX_TOKENS = 2000  # keyboards stay usable without letting the map grow forever
+MAX_CHAT_LANGS = 500  # remembered languages: an LRU, for the same reason as the tokens
 
 # Command names that identify a language on their own, used to follow the user
 # when they type /lights instead of /luci. Names shared by both languages
@@ -178,6 +183,30 @@ def esc(text: Any) -> str:
     return html.escape(str(text))
 
 
+def ha_error_text(lang: str, exc: HomeAssistantError) -> str:
+    """Render a Home Assistant failure as a localised line.
+
+    :mod:`ha_client` cannot phrase its own errors: it has no idea which chat
+    triggered the request, and therefore which of the two languages to use. It
+    raises a structured :class:`ha_client.HomeAssistantError` instead, and this is
+    where ``kind``/``status``/``detail`` become a sentence.
+
+    Args:
+        lang: Language to render in.
+        exc: The error. An exception raised by something other than the client --
+            it is typed loosely on purpose, since :func:`on_error` sees whatever
+            was raised -- falls back to its own ``str()`` as the detail.
+
+    Returns:
+        A plain sentence with no icon and no markup, meant to be interpolated into
+        ``ha_down`` or ``stt_failed`` as ``{error}``, or shown on its own in a
+        callback alert. The caller escapes it when the destination is HTML.
+    """
+    kind = getattr(exc, "kind", "generic")
+    key = f"ha_error_{kind}" if f"ha_error_{kind}" in i18n.MESSAGES else "ha_error_generic"
+    return t(lang, key, detail=getattr(exc, "detail", None) or str(exc), status=getattr(exc, "status", ""))
+
+
 def clip(text: str, lang: str = i18n.DEFAULT_LANG, limit: int = MAX_MESSAGE_CHARS) -> str:
     """Shorten a message so Telegram will accept it, keeping the HTML valid.
 
@@ -234,7 +263,13 @@ class HassBot:
         stt_entity: Entity id of the speech-to-text engine, or ``None`` when none
             is configured or discovered; voice messages are then declined with an
             explanation.
-        stt_language: BCP-47 tag passed to the STT provider, e.g. ``it-IT``.
+        stt_languages: BCP-47 tag per language, e.g. ``{"it": "it-IT", "en": "en-US"}``.
+            The chat's current language picks the entry (see :meth:`on_voice`).
+        default_lang: Language for a chat that has not said anything recognisable yet.
+        chat_lang: Remembered language per chat id, an LRU capped at
+            :data:`MAX_CHAT_LANGS`. Evicting an entry costs nothing: the chat simply
+            falls back to :attr:`default_lang` until it writes something the detector
+            recognises again.
     """
     def __init__(
         self,
@@ -254,15 +289,16 @@ class HassBot:
                 gives full control of the house to anyone who finds the bot.
             stt_entity: Speech-to-text entity to use. ``None`` asks
                 :meth:`discover_stt` to pick one at startup.
-            stt_language: Language tag for transcription. The provider must advertise
-                it or every voice message will be rejected.
+            stt_languages: Language tag per supported language. The provider must
+                advertise the tag or voice messages in that language are rejected.
+            default_lang: Language used until a chat reveals its own.
         """
         self.ha = ha
         self.allowed_chats = allowed_chats
         self.stt_entity = stt_entity
         self.stt_languages = stt_languages or {"it": "it-IT", "en": "en-US"}
         self.default_lang = i18n.normalize_lang(default_lang)
-        self.chat_lang: dict[int, str] = {}
+        self.chat_lang: OrderedDict[int, str] = OrderedDict()
 
     async def discover_stt(self) -> None:
         """Pick a speech-to-text engine when one was not configured explicitly.
@@ -349,6 +385,74 @@ class HassBot:
         """
         return await self.ha.states(), await self.ha.areas()
 
+    @staticmethod
+    def _lights(
+        states: list[dict[str, Any]],
+        areas: dict[str, str] | None = None,
+        area: str | None = None,
+        domains: tuple[str, ...] = ("light",),
+    ) -> list[dict[str, Any]]:
+        """Select the lighting entities out of a full state snapshot.
+
+        The one place the "what counts as a light" question is answered, so the
+        browser, the listings, the bulk actions and the callbacks cannot drift
+        apart on it.
+
+        Args:
+            states: A full snapshot from :meth:`snapshot`.
+            areas: Mapping ``entity_id -> area name``. Required only when ``area``
+                is given.
+            area: Restrict to one room, by exact area name.
+            domains: Which domains count. The default is ``light`` alone, which is
+                what every *browsing* caller wants: a smart plug listed among the
+                lamps is confusing. :meth:`_switch` passes
+                :data:`LIGHT_DOMAINS` so a plug can still be named explicitly.
+
+        Returns:
+            The matching entities, in snapshot order.
+        """
+        prefixes = tuple(f"{d}." for d in domains)
+        return [
+            s
+            for s in states
+            if s["entity_id"].startswith(prefixes)
+            and (area is None or (areas or {}).get(s["entity_id"]) == area)
+        ]
+
+    @staticmethod
+    def _temp_sensors(
+        states: list[dict[str, Any]],
+        areas: dict[str, str] | None = None,
+        area: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Select the temperature and humidity sensors out of a state snapshot.
+
+        Sensors are picked by ``device_class`` rather than by name, so the answer
+        does not depend on how the user named them, and by domain as well: a
+        ``binary_sensor`` or a ``number`` helper can carry
+        ``device_class: temperature`` without being a reading anyone wants to see
+        in a room summary.
+
+        Args:
+            states: A full snapshot from :meth:`snapshot`.
+            areas: Mapping ``entity_id -> area name``. Required only when ``area``
+                is given.
+            area: Restrict to one room, by exact area name.
+
+        Returns:
+            The matching entities, in snapshot order. ``climate`` entities are
+            *not* included: they carry their reading in an attribute rather than
+            in their state and are added separately, and only for a specific room
+            (see :meth:`_temperature`).
+        """
+        return [
+            s
+            for s in states
+            if s["entity_id"].startswith("sensor.")
+            and s.get("attributes", {}).get("device_class") in ("temperature", "humidity")
+            and (area is None or (areas or {}).get(s["entity_id"]) == area)
+        ]
+
     def lang_of(self, update: Update) -> str:
         """Return the language currently in use for an update's chat.
 
@@ -366,6 +470,26 @@ class HassBot:
         """
         chat = getattr(update, "effective_chat", None)
         return self.chat_lang.get(chat.id, self.default_lang) if chat else self.default_lang
+
+    def _remember_lang(self, update: Update, lang: str) -> None:
+        """Record the language a chat is speaking, keeping the store bounded.
+
+        The only writer of :attr:`chat_lang`. It is an LRU rather than a plain
+        dictionary for the same reason :func:`tok` is: the bot runs for months
+        under systemd, and with an empty allow-list any stranger who finds it can
+        otherwise add an entry per chat, forever.
+
+        Args:
+            update: The update whose chat to record. One without a chat is ignored.
+            lang: The language to remember.
+        """
+        chat = getattr(update, "effective_chat", None)
+        if chat is None:
+            return
+        self.chat_lang[chat.id] = lang
+        self.chat_lang.move_to_end(chat.id)
+        while len(self.chat_lang) > MAX_CHAT_LANGS:
+            self.chat_lang.popitem(last=False)
 
     def resolve_lang(self, update: Update, text: str | None = None) -> str:
         """Work out which language to answer an update in, and remember it.
@@ -400,9 +524,7 @@ class HassBot:
                 lang = COMMAND_LANG.get(name, current)
             else:
                 lang = i18n.detect(ent.normalize(stripped), fallback=current)
-        chat = getattr(update, "effective_chat", None)
-        if chat:
-            self.chat_lang[chat.id] = lang
+        self._remember_lang(update, lang)
         return lang
 
     async def reply(self, update: Update, text: str, lang: str = i18n.DEFAULT_LANG, **kwargs: Any) -> None:
@@ -463,9 +585,7 @@ class HassBot:
             lang = self.lang_of(update)
             await self.reply(update, t(lang, "language_unknown"), lang)
             return
-        chat = update.effective_chat
-        if chat:
-            self.chat_lang[chat.id] = chosen
+        self._remember_lang(update, chosen)
         await self.reply(update, t(chosen, "language_set"), chosen)
 
     async def cmd_lights(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -484,29 +604,48 @@ class HassBot:
         """
         if not await self.guard(update):
             return
-        lang = self.resolve_lang(update)
-        query = " ".join(ctx.args or []).strip()
-        states, areas = await self.snapshot()
-        lights = [s for s in states if s["entity_id"].startswith("light.")]
+        await self._lights_browse(update, " ".join(ctx.args or []).strip(), self.resolve_lang(update))
 
-        if not query or self._is_home(query):
+    async def _lights_browse(self, update: Update, query: str, lang: str, overview_on_miss: bool = False) -> None:
+        """Show the light browser: an overview, or the lights matching a query.
+
+        Shared by ``/luci`` and by sentences such as "fammi vedere le luci", which
+        is why authorisation is not checked here.
+
+        Args:
+            update: The update to reply to.
+            query: A room, an entity name, a whole-house word, or the empty string.
+            lang: Language to answer in.
+            overview_on_miss: What to do when the query matches nothing. A command
+                says so explicitly -- the user typed a name and deserves to know it
+                was not found. A sentence falls back to the overview instead:
+                "accendi le luci" leaves a target the parser could not reduce to
+                anything useful, and answering "no light called X" would blame the
+                user for the parser's residue.
+        """
+        states, areas = await self.snapshot()
+        lights = self._lights(states)
+        found = (
+            ent.search(query, lights, areas, domains=("light",), limit=MAX_BUTTONS)
+            if query and not self._is_home(query)
+            else []
+        )
+        if found:
             await self.reply(
                 update,
-                self._areas_summary(lights, areas, lang),
+                self._lights_text(query, found, lang),
                 lang,
-                reply_markup=self._areas_keyboard(lights, areas, lang=lang),
+                reply_markup=self._lights_keyboard(found, lang),
             )
             return
-
-        found = ent.search(query, lights, areas, domains=("light",), limit=MAX_BUTTONS)
-        if not found:
+        if query and not self._is_home(query) and not overview_on_miss:
             await self.reply(update, t(lang, "no_light_found", query=esc(query)), lang)
             return
         await self.reply(
             update,
-            self._lights_text(query, found, lang),
+            self._areas_summary(lights, areas, lang),
             lang,
-            reply_markup=self._lights_keyboard(found, lang),
+            reply_markup=self._areas_keyboard(lights, areas),
         )
 
     async def cmd_on(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -515,6 +654,8 @@ class HassBot:
         Thin wrapper over :meth:`_switch`, which does the target resolution. The
         argument may name one light, a room, or the whole house.
         """
+        if not await self.guard(update):
+            return
         await self._switch(update, " ".join(ctx.args or []), turn_on=True, lang=self.resolve_lang(update))
 
     async def cmd_off(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -522,6 +663,8 @@ class HassBot:
 
         Thin wrapper over :meth:`_switch`; see :meth:`cmd_on`.
         """
+        if not await self.guard(update):
+            return
         await self._switch(update, " ".join(ctx.args or []), turn_on=False, lang=self.resolve_lang(update))
 
     async def cmd_on_now(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -551,7 +694,7 @@ class HassBot:
             lang: Language to answer in.
         """
         states, areas = await self.snapshot()
-        on = [s for s in states if s["entity_id"].startswith("light.") and ent.is_on(s)]
+        on = [s for s in self._lights(states) if ent.is_on(s)]
         if not on:
             await self.reply(update, t(lang, "all_lights_off"), lang)
             return
@@ -636,17 +779,20 @@ class HassBot:
                 input produces a usage hint.
             turn_on: ``True`` to turn on, ``False`` to turn off.
             lang: Language to answer in.
+
+        Note:
+            Authorisation is *not* checked here, as for every other ``_*`` method:
+            both callers -- ``/accendi`` and the natural-language path -- have
+            already done it.
         """
-        if not await self.guard(update):
-            return
         verb = t(lang, "verb_on" if turn_on else "verb_off")
         if not query.strip():
-            names = {"it": ("accendi", "spegni"), "en": ("on", "off")}.get(lang, ("accendi", "spegni"))
-            await self.reply(update, t(lang, "switch_usage", command=names[0 if turn_on else 1]), lang)
+            command = t(lang, "command_on" if turn_on else "command_off")
+            await self.reply(update, t(lang, "switch_usage", command=command), lang)
             return
 
         states, areas = await self.snapshot()
-        lights = [s for s in states if s["entity_id"].startswith(tuple(f"{d}." for d in LIGHT_DOMAINS))]
+        lights = self._lights(states, domains=LIGHT_DOMAINS)
 
         # "casa" means every room; a room means every light in it.
         if self._is_home(query):
@@ -708,10 +854,8 @@ class HassBot:
         """
         return [
             s
-            for s in lights
-            if s["entity_id"].startswith("light.")
-            and s.get("state") not in ("unavailable", "unknown")
-            and (area is None or areas.get(s["entity_id"]) == area)
+            for s in HassBot._lights(lights, areas, area=area)
+            if s.get("state") not in ("unavailable", "unknown")
         ]
 
     async def _call_on_ids(self, ids: list[str], turn_on: bool) -> None:
@@ -764,7 +908,7 @@ class HassBot:
         # Italian inflects the confirmation for number, and so does the title the
         # caller built: both follow the real count, so "Studio (1 luce) accesa".
         many = len(targets) > 1
-        if len(targets) > 1 and not title:
+        if many and not title:
             what = t(lang, i18n.plural("n_entities", len(targets)), count=len(targets))
         key = f"result_{'on' if turn_on else 'off'}_{'many' if many else 'one'}"
         await self.reply(update, t(lang, key, icon=icon, what=esc(what)), lang)
@@ -775,12 +919,12 @@ class HassBot:
         Shared by ``/temperatura`` and by sentences such as "quanti gradi in salone",
         which is why authorisation is not checked here.
 
-        Sensors are selected by ``device_class`` rather than by name, so the answer
-        does not depend on how the user named their sensors. ``climate`` entities are
-        handled separately: they carry their reading in
-        ``attributes.current_temperature`` instead of in their state, and they are only
-        included when a specific room was asked for -- a thermostat in every room
-        summary would bury the actual sensor readings.
+        Sensors are selected by :meth:`_temp_sensors`, on ``device_class`` rather
+        than on name, so the answer does not depend on how the user named their
+        sensors. ``climate`` entities are handled separately: they carry their
+        reading in ``attributes.current_temperature`` instead of in their state, and
+        they are only included when a specific room was asked for -- a thermostat in
+        every room summary would bury the actual sensor readings.
 
         Four outcomes:
 
@@ -796,12 +940,7 @@ class HassBot:
             lang: Language to answer in.
         """
         states, areas = await self.snapshot()
-        sensors = [
-            s
-            for s in states
-            if s["entity_id"].startswith(("sensor.", "climate."))
-            and s.get("attributes", {}).get("device_class") in ("temperature", "humidity")
-        ]
+        sensors = self._temp_sensors(states)
         climates = [s for s in states if s["entity_id"].startswith("climate.")]
 
         if self._is_home(query):
@@ -837,7 +976,7 @@ class HassBot:
             update,
             "\n".join(lines).strip(),
             lang,
-            reply_markup=None if area else self._areas_keyboard(pool, areas, lang=lang, prefix="temp"),
+            reply_markup=None if area else self._areas_keyboard(pool, areas, prefix="temp"),
         )
 
     def _sensor_line(self, s: dict[str, Any], areas: dict[str, str], lang: str, short: bool = False) -> str:
@@ -970,7 +1109,7 @@ class HassBot:
             lines.append(f"• <b>{esc(self._area_name(name, lang))}</b>: {counts}")
         return "\n".join(lines)
 
-    def _areas_keyboard(self, states: list[dict[str, Any]], areas: dict[str, str], lang: str = i18n.DEFAULT_LANG, prefix: str = "area") -> InlineKeyboardMarkup:
+    def _areas_keyboard(self, states: list[dict[str, Any]], areas: dict[str, str], prefix: str = "area") -> InlineKeyboardMarkup:
         """Build a keyboard of rooms, two buttons per row.
 
         Args:
@@ -978,8 +1117,6 @@ class HassBot:
                 what is actually present, so a room with no relevant entity is not
                 offered -- there would be nothing to show behind the button.
             areas: Mapping ``entity_id -> area name``.
-            lang: Unused for the labels -- room names are shown as Home Assistant
-                spells them -- but kept for symmetry with the other builders.
             prefix: Callback kind, ``"area"`` to drill into lights or ``"temp"`` to
                 drill into sensors. It is what :meth:`_handle_callback` dispatches on.
 
@@ -1079,7 +1216,30 @@ class HassBot:
         try:
             await self._handle_callback(query, data, lang)
         except HomeAssistantError as exc:
-            await query.answer(str(exc)[:190], show_alert=True)
+            await query.answer(ha_error_text(lang, exc)[:190], show_alert=True)
+
+    @staticmethod
+    async def _resolve_token(query, token: str, lang: str) -> str | None:
+        """Resolve a ``callback_data`` token, answering the query when it is gone.
+
+        Every callback branch starts this way, and the failure is always handled
+        identically: a token that has fallen out of the LRU -- evicted, or left over
+        from a previous run of the process -- is a stale session, not a bug.
+
+        Args:
+            query: The ``CallbackQuery`` being handled.
+            token: The token extracted from the payload.
+            lang: Language for the alert.
+
+        Returns:
+            The stored value, or ``None`` after having already told the user the
+            session expired. A ``None`` return means the caller must simply return:
+            the query has been answered and the spinner stopped.
+        """
+        value = untok(token)
+        if value is None:
+            await query.answer(t(lang, "session_expired"), show_alert=True)
+        return value
 
     async def _handle_callback(self, query, data: str, lang: str = i18n.DEFAULT_LANG) -> None:
         """Route a callback query to its action.
@@ -1118,23 +1278,22 @@ class HassBot:
         kind, _, rest = data.partition(":")
 
         if kind in ("area", "temp"):
-            area = untok(rest)
+            area = await self._resolve_token(query, rest, lang)
             if area is None:
-                await query.answer(t(lang, "session_expired"), show_alert=True)
                 return
             await query.answer()
             states, areas = await self.snapshot()
             if kind == "temp":
-                sensors = [
-                    s for s in states
-                    if areas.get(s["entity_id"]) == area
-                    and s.get("attributes", {}).get("device_class") in ("temperature", "humidity")
-                ]
-                header = t(lang, "temp_title", title=esc(area))
-                text = "\n".join([header, ""] + [self._sensor_line(s, areas, lang, short=True) for s in sensors])
-                await query.edit_message_text(clip(text, lang) or t(lang, "no_sensors"), parse_mode=ParseMode.HTML)
+                sensors = self._temp_sensors(states, areas, area=area)
+                if sensors:
+                    lines = [t(lang, "temp_title", title=esc(area)), ""]
+                    lines += [self._sensor_line(s, areas, lang, short=True) for s in sensors]
+                    text = "\n".join(lines)
+                else:
+                    text = t(lang, "no_sensors")
+                await query.edit_message_text(clip(text, lang), parse_mode=ParseMode.HTML)
                 return
-            lights = [s for s in states if s["entity_id"].startswith("light.") and areas.get(s["entity_id"]) == area]
+            lights = self._lights(states, areas, area=area)
             await query.edit_message_text(
                 clip(self._lights_text(area, lights, lang), lang),
                 parse_mode=ParseMode.HTML,
@@ -1144,9 +1303,8 @@ class HassBot:
 
         if kind in ("do", "all"):
             action, _, token = rest.partition(":")
-            raw = untok(token)
+            raw = await self._resolve_token(query, token, lang)
             if raw is None:
-                await query.answer(t(lang, "session_expired"), show_alert=True)
                 return
             ids = raw.split("|")
             turn_on = action == "on"
@@ -1157,9 +1315,8 @@ class HassBot:
             return
 
         if kind == "refresh":
-            ids_raw = untok(rest)
+            ids_raw = await self._resolve_token(query, rest, lang)
             if ids_raw is None:
-                await query.answer(t(lang, "session_expired"), show_alert=True)
                 return
             await query.answer(t(lang, "toast_refreshed"))
             await self._refresh_message(query, ids_raw.split("|"), lang)
@@ -1225,7 +1382,7 @@ class HassBot:
 
 
     async def _dispatch_text(self, update: Update, text: str, spoken: bool = False) -> None:
-        """Interpret an Italian sentence and run the command it describes.
+        """Interpret a sentence and run the command it describes.
 
         The natural-language front end, shared by typed text and by transcribed voice
         messages: both converge here, so the two channels can never drift apart in what
@@ -1270,23 +1427,7 @@ class HassBot:
             await self._lights_on(update, lang)
             return
         if intent == "lights":
-            states, areas = await self.snapshot()
-            lights = [s for s in states if s["entity_id"].startswith("light.")]
-            found = ent.search(target, lights, areas, domains=("light",), limit=MAX_BUTTONS) if target else []
-            if found:
-                await self.reply(
-                    update,
-                    self._lights_text(target, found, lang),
-                    lang,
-                    reply_markup=self._lights_keyboard(found, lang),
-                )
-            else:
-                await self.reply(
-                    update,
-                    self._areas_summary(lights, areas, lang),
-                    lang,
-                    reply_markup=self._areas_keyboard(lights, areas, lang=lang),
-                )
+            await self._lights_browse(update, target, lang, overview_on_miss=True)
             return
 
         hint = t(lang, "voice_hint") if spoken else ""
@@ -1346,7 +1487,7 @@ class HassBot:
             )
         except HomeAssistantError as exc:
             log.warning("STT failed (%s): %s", stt_language, exc)
-            await self.reply(update, t(lang, "stt_failed", error=esc(exc)), lang)
+            await self.reply(update, t(lang, "stt_failed", error=esc(ha_error_text(lang, exc))), lang)
             return
 
         if not text:
@@ -1384,11 +1525,11 @@ async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     log line and complete silence in the chat, which reads to the user as a bot
     that has stopped working for no reason.
 
-    Home Assistant failures get a specific message including the underlying error
-    -- "connection refused" and "401" tell the user immediately whether the
-    instance is down or the token has expired -- while anything else gets a generic
-    apology, since its message is not meant for users. The full traceback goes to
-    the log either way.
+    Home Assistant failures get a specific message including the underlying error,
+    localised by :func:`ha_error_text` -- "connection refused" and "401" tell the
+    user immediately whether the instance is down or the token has expired -- while
+    anything else gets a generic apology, since its message is not meant for users.
+    The full traceback goes to the log either way.
 
     Args:
         update: The update being processed. It may not be an ``Update`` at all, and
@@ -1408,7 +1549,7 @@ async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     hass = ctx.application.bot_data.get("hass") if ctx.application else None
     lang = hass.lang_of(update) if hass else i18n.DEFAULT_LANG
     if isinstance(ctx.error, HomeAssistantError):
-        text = t(lang, "ha_down", error=esc(ctx.error))
+        text = t(lang, "ha_down", error=esc(ha_error_text(lang, ctx.error)))
     else:
         text = t(lang, "generic_error")
     try:
