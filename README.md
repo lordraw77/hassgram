@@ -1,6 +1,11 @@
 # Hassgram
 
 Bot Telegram per controllare Home Assistant tramite le sue REST API.
+**Bilingue: parla italiano e inglese**, riconosce la lingua da come gli scrivi e
+risponde nella stessa — vocali compresi.
+
+*A Telegram bot to control Home Assistant. It speaks both Italian and English:
+write in either language and it follows you. See [docs/](docs/).*
 
 ## Configurazione
 
@@ -13,7 +18,9 @@ Le credenziali sono lette da `.env` (già presente):
 | `TELEGRAM_BOT_TOKEN` | token del bot (@BotFather) |
 | `TELEGRAM_CHAT_ID` | chat autorizzate, separate da virgola. Se vuoto, il bot risponde a chiunque |
 | `HA_STT_ENTITY` | *(opzionale)* entità speech-to-text, es. `stt.google_ai_stt`. Se assente ne viene scelta una automaticamente |
-| `STT_LANGUAGE` | *(opzionale)* lingua dei vocali, default `it-IT` |
+| `BOT_LANGUAGE` | *(opzionale)* lingua iniziale di una chat nuova, `it` o `en`. Default `it` |
+| `STT_LANGUAGE_IT` | *(opzionale)* lingua dei vocali italiani, default `it-IT`. `STT_LANGUAGE` resta accettato come sinonimo |
+| `STT_LANGUAGE_EN` | *(opzionale)* lingua dei vocali inglesi, default `en-US` |
 
 ## Avvio
 
@@ -34,6 +41,11 @@ python3 bot.py
 | `/temperatura` | temperature e umidità di tutte le stanze (come `/temperatura casa`) |
 | `/temperatura bagno` | solo quella stanza |
 | `/stato <nome>` | stato di una qualsiasi entità (anche sensori, prese, climate) |
+| `/lingua it\|en` | fissa la lingua della chat (`/language` è lo stesso comando) |
+
+Ogni comando ha un alias inglese: `/lights`, `/whatson`, `/on`, `/off`,
+`/temperature`, `/state`, `/language`. **Il nome che usi è già un segnale di
+lingua**: `/luci` risponde in italiano, `/lights` in inglese.
 
 **«casa» vale come tutte le stanze insieme** — valgono anche *tutto*, *tutta la casa*, *tutte le stanze*,
 *ovunque*, *appartamento*. Nelle azioni in blocco (casa o stanza intera) le luci `unavailable` vengono escluse,
@@ -42,10 +54,27 @@ così il conteggio nella risposta è quello reale.
 Funziona anche in linguaggio naturale: *«accendi la luce dello studio»*, *«spegni le luci del salone»*,
 *«che temperatura c'è in camera da letto?»*, *«quanti gradi in salone»*, *«accendi tutto»*, *«spegni tutte le luci»*.
 
+## Bilingue 🇮🇹 🇬🇧
+
+Scrivi in inglese e il bot passa all'inglese, senza configurare niente:
+*«turn on the light in the study»*, *«turn everything off»*, *«how warm is it in
+the bedroom?»*, *«which lights are on»*. La lingua riconosciuta diventa quella
+della chat, quindi valgono anche per i bottoni e per i vocali; `/lingua it` o
+`/language en` la fissano a mano.
+
+Il riconoscimento guarda parole caratteristiche di ciascuna lingua: se il
+messaggio è troppo corto per decidere (*«salone»*) la chat resta dov'era, invece
+di cambiare lingua su un indizio debole.
+
 ## Comandi vocali 🎙
 
 Manda un **messaggio vocale** (o un audio, o un video-messaggio) con lo stesso comando che scriveresti:
 il bot lo trascrive e lo esegue, rispondendo prima con il testo riconosciuto così vedi cosa ha capito.
+
+I vocali vengono trascritti nella **lingua corrente della chat**: se la chat è in
+inglese il bot chiede a Home Assistant una trascrizione `en-US`, altrimenti
+`it-IT`. Per dettare nell'altra lingua basta scrivere un messaggio in quella
+lingua, o usare `/language`, prima di registrare.
 
 La trascrizione usa lo **speech-to-text già presente in Home Assistant** (`POST /api/stt/<entity_id>`),
 quindi nessun servizio esterno in più e nessuna chiave aggiuntiva. Sul tuo impianto viene rilevato
@@ -78,6 +107,8 @@ La documentazione completa è in [docs/](docs/) (in inglese, come il codice):
   viene renderizzata con un template Jinja lato Home Assistant e messa in cache.
   Gli stati hanno una cache di 5 secondi, invalidata a ogni chiamata di servizio.
 - [entities.py](entities.py) — ricerca fuzzy (nome, entity_id, stanza) e formattazione.
+- [i18n.py](i18n.py) — catalogo dei messaggi, rilevatore di lingua e le due grammatiche.
+  Nessuna stringa rivolta all'utente vive fuori da qui.
 - [bot.py](bot.py) — comandi, tastiere inline, vocali e parsing del linguaggio naturale.
   Testo e vocali confluiscono nello stesso interprete (`_dispatch_text`).
   I `callback_data` sono token brevi (limite Telegram: 64 byte) risolti in una mappa LRU in memoria:

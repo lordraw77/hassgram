@@ -36,7 +36,9 @@ configuration.
 | `HOME_ASSISTANT_API_ACCESS_TOKEN` | ✔ | — | Long-lived access token. |
 | `TELEGRAM_CHAT_ID` | — | *(empty)* | Comma-separated chat ids allowed to use the bot. **Empty means anyone may use it.** |
 | `HA_STT_ENTITY` | — | auto-detected | Speech-to-text entity, e.g. `stt.google_ai_stt`. |
-| `STT_LANGUAGE` | — | `it-IT` | Language tag passed to the STT provider. |
+| `BOT_LANGUAGE` | — | `it` | Language for a chat that has not said anything recognisable yet, `it` or `en`. Detection overrides it per chat — see [languages.md](languages.md). |
+| `STT_LANGUAGE_IT` | — | `it-IT` | Transcription tag for Italian. `STT_LANGUAGE` is still accepted as a synonym, so older `.env` files keep working. |
+| `STT_LANGUAGE_EN` | — | `en-US` | Transcription tag for English. |
 
 Missing any of the three required variables exits immediately with a message
 naming them. This is the most common first-run mistake.
@@ -48,9 +50,12 @@ TELEGRAM_BOT_TOKEN=123456789:AA...
 HOME_ASSISTANT_API_URL=http://homeassistant.local:8123/api/
 HOME_ASSISTANT_API_ACCESS_TOKEN=eyJhbGciOi...
 TELEGRAM_CHAT_ID=182700000
-# STT is optional: without these, an stt.* entity is auto-detected and it-IT is used
+# STT is optional: without these, an stt.* entity is auto-detected
 #HA_STT_ENTITY=stt.google_ai_stt
-#STT_LANGUAGE=it-IT
+# Language is detected per message; these only set defaults and STT tags
+#BOT_LANGUAGE=it
+#STT_LANGUAGE_IT=it-IT
+#STT_LANGUAGE_EN=en-US
 ```
 
 `.env` is listed in `.gitignore`. Both tokens in it are equivalent to full
@@ -112,10 +117,11 @@ A healthy start logs three lines:
 
 ```
 … | Home Assistant: API running.
-… | Speech-to-text: stt.google_ai_stt (lingua it-IT)
-… | Bot avviato (chat autorizzate: {182700000})
+… | Speech-to-text: stt.google_ai_stt (languages: {'it': 'it-IT', 'en': 'en-US'})
+… | Bot started (allowed chats: {182700000}, default language: it)
 ```
 
 The first line means the URL and token work; the second names the transcription
-engine (or warns that none was found); the third confirms the allow-list. For
-running it permanently, see [operations.md](operations.md).
+engine (or warns that none was found); the third confirms the allow-list and the
+starting language. For running it permanently, see
+[operations.md](operations.md).

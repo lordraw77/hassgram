@@ -16,7 +16,7 @@ Telegram voice note (ogg/opus, 48 kHz)
         │  POST /api/stt/<entity_id>
         │  body:   the raw audio
         │  header: X-Speech-Content: format=ogg; codec=opus; sample_rate=16000;
-        │                            bit_rate=16; channel=1; language=it-IT
+        │                            bit_rate=16; channel=1; language=<chat language>
         ▼
    Home Assistant STT provider  →  {"result": "success", "text": "accendi lo studio"}
         │
@@ -55,6 +55,16 @@ drives the actual decoding.
 
 The practical consequence: **no resampling, no ffmpeg, no temporary files.**
 The bytes go from Telegram straight into the STT request.
+
+## Language
+
+Audio carries no detectable language, so the tag sent to the engine is the
+**chat's current language**: `it-IT` for an Italian conversation, `en-US` for an
+English one, overridable with `STT_LANGUAGE_IT` and `STT_LANGUAGE_EN`. Write one
+message in the other language, or run `/language`, before recording.
+
+The engine must advertise the language or it returns a 400 before decoding any
+audio. See [languages.md](languages.md#voice).
 
 ## Configuration
 

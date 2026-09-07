@@ -1,7 +1,9 @@
 # Usage
 
-The bot speaks Italian. Everything below is what a user types or says; the
-explanations are in English.
+The bot speaks Italian and English, and works out which one you are using from
+what you write — see [languages.md](languages.md). The examples below are
+Italian; every command has an English name and every sentence an English
+equivalent.
 
 ## Commands
 
@@ -16,6 +18,7 @@ explanations are in English.
 | `/temperatura` | `/temp` | Temperature and humidity for every room. |
 | `/temperatura bagno` | | Only that room. |
 | `/stato <name>` | `/state` | State of any entity in any domain — sensors, plugs, thermostats, media players. |
+| `/lingua it\|en` | `/language` | Show or pin the chat's language. |
 
 ## The word "casa"
 
@@ -91,7 +94,9 @@ command. It is not an error, and re-sending the command always works.
 
 Send a voice note (or an audio file, or a video note) saying the same thing you
 would type. The bot transcribes it, echoes what it understood, and then executes
-it. See [voice.md](voice.md) for setup and troubleshooting.
+it. It is transcribed in the chat's current language. See [voice.md](voice.md)
+for setup and troubleshooting, and [languages.md](languages.md#voice) for how
+that language is picked.
 
 ## Fuzzy matching
 

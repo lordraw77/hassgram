@@ -42,7 +42,15 @@ import re
 import unicodedata
 from typing import Any
 
+import i18n
+
 OFF_STATES = {"off", "unavailable", "unknown", "none", ""}
+
+# Sentinel key for entities that belong to no area. Kept language-neutral on
+# purpose: grouping happens once, rendering happens per conversation, and the
+# two must not be tangled -- the same grouping may be shown to an Italian and
+# an English speaker.
+NO_AREA = "\x00no-area\x00"
 
 
 def normalize(text: str) -> str:
@@ -169,21 +177,24 @@ def state_icon(state: dict[str, Any]) -> str:
     return "🟡" if is_on(state) else "⚫"
 
 
-def state_text(state: dict[str, Any]) -> str:
-    """Translate a raw state into the Italian word shown to the user.
+def state_text(state: dict[str, Any], lang: str = i18n.DEFAULT_LANG) -> str:
+    """Translate a raw state into the word shown to the user.
 
     Args:
         state: A Home Assistant state dictionary.
+        lang: Language to render in.
 
     Returns:
-        The Italian label for the four states the bot displays in light lists
+        The localised label for the four states the bot displays in light lists
         (``on``, ``off``, ``unavailable``, ``unknown``). Any other value -- a
         temperature reading, a ``climate`` mode, a media state -- is returned
         unchanged, which is why sensor values can flow through this function
         untouched.
     """
     raw = state.get("state")
-    return {"on": "accesa", "off": "spenta", "unavailable": "non disponibile", "unknown": "sconosciuto"}.get(raw, raw)
+    if raw in ("on", "off", "unavailable", "unknown"):
+        return i18n.t(lang, f"state_{raw}")
+    return raw
 
 
 def search(
@@ -274,20 +285,21 @@ def group_by_area(states: list[dict[str, Any]], areas: dict[str, str]) -> dict[s
         areas: Mapping ``entity_id -> area name``.
 
     Returns:
-        A dictionary ``area name -> entities``. Entities with no area land in the
-        ``"Senza stanza"`` bucket. Areas are ordered alphabetically,
-        case-insensitively, with ``"Senza stanza"`` forced last; entities inside
+        A dictionary ``area name -> entities``. Entities with no area land under
+        the :data:`NO_AREA` sentinel, which callers render in the conversation's
+        language or filter out. Areas are ordered alphabetically,
+        case-insensitively, with :data:`NO_AREA` forced last; entities inside
         each group are sorted by friendly name. The ordering is stable on purpose:
         the keys drive the order of the inline keyboard buttons, and buttons that
         move between two renderings of the same message are a usability problem.
 
     Note:
         Callers that only want real rooms -- the area keyboards, the per-room
-        temperature listing -- filter ``"Senza stanza"`` out themselves.
+        temperature listing -- filter :data:`NO_AREA` out themselves.
     """
     grouped: dict[str, list[dict[str, Any]]] = {}
     for st in states:
-        grouped.setdefault(areas.get(st["entity_id"], "Senza stanza"), []).append(st)
+        grouped.setdefault(areas.get(st["entity_id"], NO_AREA), []).append(st)
     for group in grouped.values():
         group.sort(key=friendly_name)
-    return dict(sorted(grouped.items(), key=lambda kv: (kv[0] == "Senza stanza", kv[0].lower())))
+    return dict(sorted(grouped.items(), key=lambda kv: (kv[0] == NO_AREA, kv[0].lower())))

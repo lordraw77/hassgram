@@ -2,32 +2,35 @@
 
 ## Module boundaries
 
-The three modules are layered, and the dependency arrows only point one way.
+The four modules are layered, and the dependency arrows only point one way.
 
 ```
-          ┌───────────────────────────────────────────┐
-          │ bot.py                                    │
-          │   Telegram handlers, keyboards, formatting│
-          │   Italian natural-language parser         │
-          │   voice pipeline                          │
-          └──────────────┬─────────────┬──────────────┘
-                         │             │
-              ┌──────────▼───────┐  ┌──▼──────────────┐
-              │ entities.py      │  │ ha_client.py    │
-              │ search, ranking, │  │ HTTP, caching,  │
-              │ formatting       │  │ error mapping   │
-              │ (pure, no I/O)   │  └──┬──────────────┘
-              └──────────────────┘     │
-                                       ▼
-                              Home Assistant REST API
+       ┌──────────────────────────────────────────────┐
+       │ bot.py                                       │
+       │   Telegram handlers, keyboards, formatting   │
+       │   language resolution, voice pipeline        │
+       └────────┬──────────────┬──────────────┬───────┘
+                │              │              │
+     ┌──────────▼──────┐  ┌────▼──────────┐  ┌▼─────────────────┐
+     │ entities.py     │──▶│ i18n.py       │  │ ha_client.py     │
+     │ search, ranking,│  │ catalogue,    │  │ HTTP, caching,   │
+     │ formatting      │  │ detection,    │  │ error mapping    │
+     │ (pure, no I/O)  │  │ grammars      │  └───┬──────────────┘
+     └─────────────────┘  │ (pure, no I/O)│      │
+                          └───────────────┘      ▼
+                                        Home Assistant REST API
 ```
 
+- **`i18n.py`** depends on nothing. It holds every user-facing string, the
+  language detector and the two command grammars, so no other module contains a
+  sentence a user will ever read.
 - **`entities.py`** knows nothing about Telegram or HTTP. Every function is
   synchronous, pure, and operates on plain dictionaries, which makes it the
-  part of the codebase that can be exercised without a running instance.
+  part of the codebase that can be exercised without a running instance. It
+  reaches into `i18n` only to name entity states.
 - **`ha_client.py`** knows nothing about Telegram. It is the only place that
   performs I/O and the only place that raises `HomeAssistantError`.
-- **`bot.py`** depends on both and is the only module that imports
+- **`bot.py`** depends on all three and is the only module that imports
   `python-telegram-bot`.
 
 ## Request flow
@@ -53,6 +56,28 @@ Everything that changes the state of the house funnels through
 `HassBot._call_on_ids`, which is the single place that talks to
 `light.turn_on` / `turn_off`. That is what keeps the four entry points from
 drifting apart in behaviour.
+
+## Language
+
+Every handler starts by resolving a language — from the command name, from the
+words, or from what the chat was already using — and passes it down explicitly.
+`i18n.parse` then reduces the sentence to a **language-independent intent**, so
+everything below the parser is shared between Italian and English:
+
+```
+"accendi lo studio"  ─┐                        ┌─ ("on", "studio")
+                      ├─ detect ─► parse(lang) ─┤                  ─► _switch
+"turn on the study"  ─┘                        └─ ("on", "study")
+```
+
+The resolved language is remembered per chat, because three kinds of input carry
+no language of their own: button taps, voice messages, and errors raised before
+anything was parsed. It lives in a plain dict and is therefore lost on restart,
+like the callback tokens — a chat falls back to `BOT_LANGUAGE` until its next
+recognisable message.
+
+The full rules, including why English has to check "which lights are on" before
+"turn on", are in [languages.md](languages.md).
 
 ## Target resolution
 
@@ -182,7 +207,10 @@ the client spins, so Home Assistant failures there become a Telegram alert.
 
 - **No database.** Nothing needs to survive a restart.
 - **No LLM, no cloud NLU.** The vocabulary is fixed, which makes the bot
-  predictable, instant, and functional without an internet connection.
+  predictable, instant, and functional without an internet connection. That
+  applies to language detection too: it is word counting, not a classifier.
+- **No translation at runtime.** Both languages are written out in
+  `i18n.MESSAGES`; nothing is machine-translated on the fly.
 - **No ffmpeg.** Telegram voice notes are Ogg/Opus, which Home Assistant's STT
   providers accept natively. See [voice.md](voice.md).
 - **No per-user state.** Authorisation is a flat allow-list of chat ids.

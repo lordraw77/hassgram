@@ -7,15 +7,18 @@
 | [`bot.py`](../bot.py) | Telegram handlers, keyboards, formatting, natural-language parser, voice pipeline, `main()` |
 | [`ha_client.py`](../ha_client.py) | The only module that performs I/O; caching and error mapping |
 | [`entities.py`](../entities.py) | Pure domain layer: search, ranking, formatting. No I/O, no Telegram |
+| [`i18n.py`](../i18n.py) | Message catalogue, language detection, the two command grammars. Pure |
 
-Dependencies point one way only — `bot` → {`entities`, `ha_client`} — and
-`entities` imports neither of the others. Keeping that arrow direction is the
-main structural rule of the codebase.
+Dependencies point one way only — `bot` → {`entities`, `ha_client`, `i18n`},
+`entities` → `i18n` — and `i18n` imports nothing of its own. Keeping that arrow
+direction is the main structural rule of the codebase.
 
 ## Conventions
 
-- **Language**: user-facing strings are Italian; identifiers, comments and
-  docstrings are English.
+- **Language**: identifiers, comments, docstrings and log messages are English.
+  **User-facing strings live only in `i18n.MESSAGES`** — never write one inline,
+  in either language. Adding a message means adding a key with both
+  translations.
 - **Method naming in `HassBot`**: `cmd_*` is bound to a command, `on_*` to a
   non-command update, `_*` is internal. `cmd_*` and `on_*` call `guard()` first;
   `_*` methods assume authorisation has already been checked. That is what lets
@@ -95,8 +98,11 @@ Cases worth covering, because they encode decisions that are easy to break:
 
 - `unavailable` entities are excluded from bulk operations but still counted in
   the "N out of M" summary.
-- `_is_home` matches exactly, never as a substring.
-- `_strip_verbs("accendi tutto")` returns `"casa"`, not `""`.
+- `_is_home` matches exactly, never as a substring, in both languages.
+- `i18n.strip_filler("accendi tutto", "it")` and
+  `i18n.strip_filler("turn everything off", "en")` both return `"casa"`, not `""`.
+- `i18n.detect` leaves an ambiguous message on the chat's current language.
+- `i18n.parse("which lights are on", "en")` is `lights_on`, not `on`.
 - `clip()` leaves `<b>` tags balanced.
 - An evicted token yields "sessione scaduta" rather than an exception.
 - Every callback branch answers the query, including unknown payloads.
@@ -119,18 +125,26 @@ excludes commands, so an unknown `/command` is not fed to the parser.
 
 ### Teaching it a new phrasing
 
-The parser lives in `_dispatch_text`, and the vocabulary it strips lives in
-`_strip_verbs`. Both operate on `normalize()` output — lowercase, no accents,
-`_ . '` turned into spaces — so patterns must be written in that form: `perche`,
-not `perché`.
+The grammar lives in `i18n.PATTERNS` and `i18n.RULES`, one entry per language;
+`_dispatch_text` only maps the resulting intent to a handler. Everything
+operates on `normalize()` output — lowercase, no accents, `_ . '` turned into
+spaces — so patterns must be written in that form: `perche`, not `perché`, and
+`what s` for `what's`.
 
-Adding a verb usually means touching both: the pattern that recognises the
-intent, and the strip list that removes the verb before the remainder is
-searched. **Never add a word to `_strip_verbs` that could be part of a room or
-entity name** — it would be deleted from every query.
+Adding a verb usually means touching two things in the same language's pattern
+set: the expression that recognises the intent, and the `strip` list that
+removes the verb before the remainder is searched. **Never add a word to a
+`strip` list that could be part of a room or entity name** — it would be deleted
+from every query in that language.
 
-Rule order in `_dispatch_text` is significant. Temperature is checked before
-lighting because "quanti gradi in salone" contains a room name too.
+Rule order in `RULES` is significant and differs between the languages.
+Temperature is checked first in both, because "quanti gradi in salone" names a
+room too. English then checks the listing rule before `off`/`on`, because `on`
+is both the imperative particle and the state — see
+[languages.md](languages.md#natural-language).
+
+Adding a whole language is a contained job, described in
+[languages.md](languages.md#adding-a-third-language).
 
 ### Adding a callback button
 
@@ -157,6 +171,8 @@ convenience into an incident.
 | Forgetting `query.answer()` | The button spins for ~30 seconds. |
 | Using `is_on()` to pick bulk targets | It folds `unavailable` into "off", so unreachable lights would be counted as acted upon. Filter on the raw state, as `_bulk_targets` does. |
 | Writing accented patterns | `normalize()` strips accents before matching, so `è` can never match. |
+| Writing a user-facing string inline | It will only ever exist in one language. Add a key to `i18n.MESSAGES`. |
+| Adding `on`/`off` to an English pattern casually | `on` is both a verb particle and a state; rule order in `RULES` is what keeps them apart. |
 | Assuming `attributes` keys exist | Home Assistant omits attributes freely; use `.get()`. |
 | Expecting area changes to appear | The area map is cached for the process lifetime. Restart. |
 | Catching bare `Exception` around `edit_message_text` | It hides real failures. Catch `BadRequest` and re-raise anything that is not "message is not modified". |

@@ -1,12 +1,13 @@
 # Hassgram documentation
 
 Hassgram is a Telegram bot that drives a [Home Assistant](https://www.home-assistant.io/)
-installation over its REST API. It answers typed commands, free-form Italian
-sentences and voice messages, and it renders inline keyboards so the common
-follow-up ("now turn that one off") is a tap rather than another command.
+installation over its REST API. It answers typed commands, free-form sentences
+and voice messages, and it renders inline keyboards so the common follow-up
+("now turn that one off") is a tap rather than another command.
 
-The bot speaks Italian to its users; the code, comments and this documentation
-are in English.
+It is **bilingual**: it works out whether you are writing Italian or English and
+answers in the same language, voice messages included. See
+[languages.md](languages.md).
 
 ## Where to start
 
@@ -14,6 +15,7 @@ are in English.
 |---|---|
 | install and configure the bot | [configuration.md](configuration.md) |
 | know what you can say to it | [usage.md](usage.md) |
+| use it in Italian and English | [languages.md](languages.md) |
 | understand how it is put together | [architecture.md](architecture.md) |
 | set up or debug voice commands | [voice.md](voice.md) |
 | look up a module, class or function | [api-reference.md](api-reference.md) |
@@ -22,9 +24,10 @@ are in English.
 
 ## At a glance
 
-- **Three modules, ~800 lines.** [`bot.py`](../bot.py) owns everything
-  Telegram-shaped, [`ha_client.py`](../ha_client.py) owns all HTTP traffic, and
-  [`entities.py`](../entities.py) is a pure domain layer with no I/O.
+- **Four modules.** [`bot.py`](../bot.py) owns everything Telegram-shaped,
+  [`ha_client.py`](../ha_client.py) owns all HTTP traffic,
+  [`entities.py`](../entities.py) is a pure domain layer with no I/O, and
+  [`i18n.py`](../i18n.py) holds every user-facing string plus the two grammars.
 - **Three dependencies**: `python-telegram-bot`, `httpx`, `python-dotenv`.
 - **No database, no message queue, no external AI service.** The natural
   language parser is a fixed set of regular expressions; transcription reuses
@@ -43,3 +46,4 @@ They are explained where they bite, but in summary:
 | Message length | 4096 chars | Every reply is truncated on a line boundary by `clip()`. |
 | Service call addressing | one domain per call | Targets are grouped by domain before switching. |
 | REST API area registry | not exposed | Room names are rendered by a Jinja template inside Home Assistant. |
+| Audio carries no language | — | Voice is transcribed in the chat's current language. See [languages.md](languages.md#voice). |

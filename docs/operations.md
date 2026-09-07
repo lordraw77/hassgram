@@ -70,12 +70,15 @@ What to expect at each level:
 | `ERROR` | unhandled exceptions, with traceback, from `on_error` |
 | `DEBUG` | ambiguous room matches, unknown callback payloads, suppressed "message is not modified" edits |
 
+Log messages are English regardless of what language the bot is speaking to its
+users.
+
 A healthy start is exactly three INFO lines:
 
 ```
 … | Home Assistant: API running.
-… | Speech-to-text: stt.google_ai_stt (lingua it-IT)
-… | Bot avviato (chat autorizzate: {182700000})
+… | Speech-to-text: stt.google_ai_stt (languages: {'it': 'it-IT', 'en': 'en-US'})
+… | Bot started (allowed chats: {182700000}, default language: it)
 ```
 
 Turn on debug when diagnosing the parser or the keyboards, by changing `level`
@@ -156,6 +159,17 @@ cannot reach the device; that is upstream of the bot. Note that bulk operations
 skip such entities by design, which is why "Salone (2 luci)" can report fewer
 lights than the room contains.
 
+### The bot answers in the wrong language
+
+Language is detected per message and remembered per chat; a message too short to
+carry evidence keeps the chat where it was. `/lingua it` or `/language en` pins
+it. Voice messages follow the chat's current language, so a voice note recorded
+right after switching is transcribed with the new tag. See
+[languages.md](languages.md).
+
+Note that the preference lives in memory: **a restart puts every chat back to
+`BOT_LANGUAGE`.**
+
 ### Buttons say "Sessione scaduta"
 
 Expected for old messages, and for any message predating the last restart. The
@@ -176,9 +190,10 @@ systemctl start hassgram
 journalctl -u hassgram -n 20
 ```
 
-Nothing persists across restarts: no database, no migrations. The only state
-lost is the callback-token store, so keyboards in old messages will report an
-expired session on their first tap.
+Nothing persists across restarts: no database, no migrations. Two pieces of
+in-memory state are lost: the callback-token store, so keyboards in old messages
+report an expired session on their first tap, and the per-chat language, which
+reverts to `BOT_LANGUAGE` until the next recognisable message.
 
 `python-telegram-bot` is capped below v23 in `requirements.txt` because handler
 APIs change between major versions — lifting that cap is a code change, not a
