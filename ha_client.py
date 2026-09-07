@@ -78,7 +78,7 @@ class HomeAssistantClient:
 
     Attributes:
         base_url: The API root, trailing slash removed, e.g.
-            ``http://192.168.0.220:8123/api``.
+            ``http://homeassistant.local:8123/api``.
 
     Example:
         >>> ha = HomeAssistantClient("http://ha.local:8123/api/", token)  # doctest: +SKIP
@@ -95,7 +95,7 @@ class HomeAssistantClient:
 
         Args:
             base_url: Root of the REST API, with or without a trailing slash. It must
-                include the ``/api`` suffix, e.g. ``http://192.168.0.220:8123/api``.
+                include the ``/api`` suffix, e.g. ``http://homeassistant.local:8123/api``.
                 Every other method passes root-relative paths such as ``/states``.
             token: A Home Assistant long-lived access token, sent as
                 ``Authorization: Bearer ...`` on every request. It grants full access

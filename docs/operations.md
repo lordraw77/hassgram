@@ -143,7 +143,7 @@ If rooms never appear at all, test the template by hand:
 curl -s -X POST -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"template":"{{ areas() | list }}"}' \
-  http://ha:8123/api/template
+  http://homeassistant.local:8123/api/template
 ```
 
 An empty list means no areas are defined in Home Assistant, and every entity

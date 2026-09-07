@@ -80,7 +80,7 @@ Assistant (Google Generative AI, Whisper via Wyoming, and others). Check what
 you have with:
 
 ```bash
-curl -s -H "Authorization: Bearer $TOKEN" http://ha:8123/api/states \
+curl -s -H "Authorization: Bearer $TOKEN" http://homeassistant.local:8123/api/states \
   | jq -r '.[].entity_id | select(startswith("stt."))'
 ```
 
@@ -102,7 +102,7 @@ detects engines **once, at startup** — restart it after adding one.
 The provider rejected the request. Ask it what it accepts:
 
 ```bash
-curl -s -H "Authorization: Bearer $TOKEN" http://ha:8123/api/stt/stt.google_ai_stt | jq .
+curl -s -H "Authorization: Bearer $TOKEN" http://homeassistant.local:8123/api/stt/stt.google_ai_stt | jq .
 ```
 
 The response lists supported formats, codecs, sample rates, bit rates, channel

@@ -8,7 +8,7 @@ Le credenziali sono lette da `.env` (già presente):
 
 | variabile | uso |
 |---|---|
-| `HOME_ASSISTANT_API_URL` | endpoint API, es. `http://192.168.0.220:8123/api/` |
+| `HOME_ASSISTANT_API_URL` | endpoint API, es. `http://homeassistant.local:8123/api/` |
 | `HOME_ASSISTANT_API_ACCESS_TOKEN` | long-lived access token di Home Assistant |
 | `TELEGRAM_BOT_TOKEN` | token del bot (@BotFather) |
 | `TELEGRAM_CHAT_ID` | chat autorizzate, separate da virgola. Se vuoto, il bot risponde a chiunque |

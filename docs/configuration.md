@@ -32,7 +32,7 @@ configuration.
 | Variable | Required | Default | Meaning |
 |---|:---:|---|---|
 | `TELEGRAM_BOT_TOKEN` | ✔ | — | Bot token from [@BotFather](https://t.me/BotFather). |
-| `HOME_ASSISTANT_API_URL` | ✔ | — | API root, including the `/api/` suffix: `http://192.168.0.220:8123/api/`. |
+| `HOME_ASSISTANT_API_URL` | ✔ | — | API root, including the `/api/` suffix: `http://homeassistant.local:8123/api/`. |
 | `HOME_ASSISTANT_API_ACCESS_TOKEN` | ✔ | — | Long-lived access token. |
 | `TELEGRAM_CHAT_ID` | — | *(empty)* | Comma-separated chat ids allowed to use the bot. **Empty means anyone may use it.** |
 | `HA_STT_ENTITY` | — | auto-detected | Speech-to-text entity, e.g. `stt.google_ai_stt`. |
@@ -45,7 +45,7 @@ naming them. This is the most common first-run mistake.
 
 ```ini
 TELEGRAM_BOT_TOKEN=123456789:AA...
-HOME_ASSISTANT_API_URL=http://192.168.0.220:8123/api/
+HOME_ASSISTANT_API_URL=http://homeassistant.local:8123/api/
 HOME_ASSISTANT_API_ACCESS_TOKEN=eyJhbGciOi...
 TELEGRAM_CHAT_ID=182700000
 # STT is optional: without these, an stt.* entity is auto-detected and it-IT is used
@@ -72,7 +72,7 @@ same page — do that first if it ever leaks.
 Verify it before starting the bot:
 
 ```bash
-curl -s -H "Authorization: Bearer $TOKEN" http://192.168.0.220:8123/api/ | jq .
+curl -s -H "Authorization: Bearer $TOKEN" http://homeassistant.local:8123/api/ | jq .
 # {"message": "API running."}
 ```
 
