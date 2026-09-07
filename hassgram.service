@@ -1,0 +1,14 @@
+[Unit]
+Description=Hassgram - bot Telegram per Home Assistant
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/hassgram
+ExecStart=/usr/bin/python3 /opt/hassgram/bot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

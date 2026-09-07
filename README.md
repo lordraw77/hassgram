@@ -1,0 +1,94 @@
+# Hassgram
+
+Bot Telegram per controllare Home Assistant tramite le sue REST API.
+
+## Configurazione
+
+Le credenziali sono lette da `.env` (già presente):
+
+| variabile | uso |
+|---|---|
+| `HOME_ASSISTANT_API_URL` | endpoint API, es. `http://192.168.0.220:8123/api/` |
+| `HOME_ASSISTANT_API_ACCESS_TOKEN` | long-lived access token di Home Assistant |
+| `TELEGRAM_BOT_TOKEN` | token del bot (@BotFather) |
+| `TELEGRAM_CHAT_ID` | chat autorizzate, separate da virgola. Se vuoto, il bot risponde a chiunque |
+| `HA_STT_ENTITY` | *(opzionale)* entità speech-to-text, es. `stt.google_ai_stt`. Se assente ne viene scelta una automaticamente |
+| `STT_LANGUAGE` | *(opzionale)* lingua dei vocali, default `it-IT` |
+
+## Avvio
+
+```bash
+pip install -r requirements.txt
+python3 bot.py
+```
+
+## Comandi
+
+| comando | cosa fa |
+|---|---|
+| `/luci` | riepilogo per stanza + tastiera; toccando una stanza si vedono le sue luci con toggle |
+| `/luci salone` | solo le luci che corrispondono a «salone» |
+| `/accese` | tutte le luci accese in questo momento, raggruppate per stanza |
+| `/accendi studio` | accende una luce, un'intera stanza, o tutta la casa con `/accendi casa` |
+| `/spegni luciCucina` | spegne; se il nome è ambiguo propone una scelta a bottoni |
+| `/temperatura` | temperature e umidità di tutte le stanze (come `/temperatura casa`) |
+| `/temperatura bagno` | solo quella stanza |
+| `/stato <nome>` | stato di una qualsiasi entità (anche sensori, prese, climate) |
+
+**«casa» vale come tutte le stanze insieme** — valgono anche *tutto*, *tutta la casa*, *tutte le stanze*,
+*ovunque*, *appartamento*. Nelle azioni in blocco (casa o stanza intera) le luci `unavailable` vengono escluse,
+così il conteggio nella risposta è quello reale.
+
+Funziona anche in linguaggio naturale: *«accendi la luce dello studio»*, *«spegni le luci del salone»*,
+*«che temperatura c'è in camera da letto?»*, *«quanti gradi in salone»*, *«accendi tutto»*, *«spegni tutte le luci»*.
+
+## Comandi vocali 🎙
+
+Manda un **messaggio vocale** (o un audio, o un video-messaggio) con lo stesso comando che scriveresti:
+il bot lo trascrive e lo esegue, rispondendo prima con il testo riconosciuto così vedi cosa ha capito.
+
+La trascrizione usa lo **speech-to-text già presente in Home Assistant** (`POST /api/stt/<entity_id>`),
+quindi nessun servizio esterno in più e nessuna chiave aggiuntiva. Sul tuo impianto viene rilevato
+`stt.google_ai_stt`, che accetta ogg/opus — lo stesso formato dei vocali Telegram — quindi **non serve
+ffmpeg né alcuna conversione**. I metadati vanno nell'header `X-Speech-Content`; Home Assistant accetta
+solo `sample_rate=16000`, ma il contenitore ogg porta con sé il proprio sample rate (48 kHz per Telegram)
+e il provider lo decodifica correttamente.
+
+Se in Home Assistant non c'è nessuna entità `stt.`, i comandi scritti continuano a funzionare e ai vocali
+il bot risponde spiegando che manca il motore di trascrizione.
+
+## Documentazione
+
+La documentazione completa è in [docs/](docs/) (in inglese, come il codice):
+
+| documento | contenuto |
+|---|---|
+| [docs/configuration.md](docs/configuration.md) | installazione, variabili d'ambiente, come ottenere token e chat id |
+| [docs/usage.md](docs/usage.md) | comandi, linguaggio naturale, bottoni, ricerca fuzzy |
+| [docs/architecture.md](docs/architecture.md) | moduli, flusso di una richiesta, cache, token dei callback, limiti di Telegram |
+| [docs/voice.md](docs/voice.md) | pipeline dei vocali, la questione del sample rate, diagnostica |
+| [docs/api-reference.md](docs/api-reference.md) | firme e sommari di ogni funzione |
+| [docs/operations.md](docs/operations.md) | systemd, log, runbook dei guasti, note di sicurezza |
+| [docs/development.md](docs/development.md) | convenzioni, test, come aggiungere comandi e frasi |
+
+## Come è fatto
+
+- [ha_client.py](ha_client.py) — client async su `httpx`: `/api/states`, `/api/services/<domain>/<service>`,
+  `/api/template`. Le aree non sono esposte dalla REST API, quindi la mappa `entity_id → stanza`
+  viene renderizzata con un template Jinja lato Home Assistant e messa in cache.
+  Gli stati hanno una cache di 5 secondi, invalidata a ogni chiamata di servizio.
+- [entities.py](entities.py) — ricerca fuzzy (nome, entity_id, stanza) e formattazione.
+- [bot.py](bot.py) — comandi, tastiere inline, vocali e parsing del linguaggio naturale.
+  Testo e vocali confluiscono nello stesso interprete (`_dispatch_text`).
+  I `callback_data` sono token brevi (limite Telegram: 64 byte) risolti in una mappa LRU in memoria:
+  oltre le ultime 2000 voci i token più vecchi decadono e il bot risponde «sessione scaduta».
+  Ogni risposta passa da un unico helper che tronca su un confine di riga, così non si supera
+  il limite di 4096 caratteri di Telegram; un error handler globale trasforma qualunque
+  eccezione (Home Assistant irraggiungibile compreso) in un messaggio all'utente.
+
+## Esecuzione come servizio
+
+```bash
+cp hassgram.service /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now hassgram
+```
