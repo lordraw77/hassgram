@@ -60,9 +60,11 @@ MESSAGES: dict[str, dict[str, str]] = {
             "/temperatura [<i>stanza</i>] — es. <code>/temperatura salone</code>\n"
             "<i>«casa» vale come tutte le stanze insieme.</i>\n"
             "/stato <i>nome</i> — stato di una qualsiasi entità\n"
+            "/esegui [<i>nome</i>] — scene, script e automazioni; senza nome te le elenco\n"
             "/lingua <i>it|en</i> — cambia lingua\n\n"
             "Puoi anche scrivermi in linguaggio naturale: "
-            "<i>«accendi la luce dello studio»</i>, <i>«che temperatura c'è in camera?»</i>\n"
+            "<i>«accendi la luce dello studio»</i>, <i>«che temperatura c'è in camera?»</i>, "
+            "<i>«esegui la scena cinema»</i>\n"
             "🎙 <b>Oppure mandami un vocale</b> con lo stesso comando: lo trascrivo con "
             "Home Assistant e lo eseguo.\n\n"
             "🇬🇧 <i>I speak English too — just write to me in English.</i>"
@@ -78,9 +80,11 @@ MESSAGES: dict[str, dict[str, str]] = {
             "/temperature [<i>room</i>] — e.g. <code>/temperature living room</code>\n"
             "<i>«house» means every room at once.</i>\n"
             "/state <i>name</i> — state of any entity\n"
+            "/run [<i>name</i>] — scenes, scripts and automations; with no name I list them\n"
             "/language <i>it|en</i> — switch language\n\n"
             "You can also just talk to me: "
-            "<i>«turn on the light in the study»</i>, <i>«how warm is it in the bedroom?»</i>\n"
+            "<i>«turn on the light in the study»</i>, <i>«how warm is it in the bedroom?»</i>, "
+            "<i>«run the movie scene»</i>\n"
             "🎙 <b>Or send me a voice message</b> with the same command: I transcribe it "
             "with Home Assistant and run it.\n\n"
             "🇮🇹 <i>Parlo anche italiano — scrivimi pure in italiano.</i>"
@@ -142,6 +146,36 @@ MESSAGES: dict[str, dict[str, str]] = {
     "result_on_many": {"it": "{icon} <b>{what}</b> accese.", "en": "{icon} <b>{what}</b> turned on."},
     "result_off_one": {"it": "{icon} <b>{what}</b> spenta.", "en": "{icon} <b>{what}</b> turned off."},
     "result_off_many": {"it": "{icon} <b>{what}</b> spente.", "en": "{icon} <b>{what}</b> turned off."},
+    # --- running scenes, scripts and automations
+    "command_run": {"it": "esegui", "en": "run"},
+    "domain_scene": {"it": "Scene", "en": "Scenes"},
+    "domain_script": {"it": "Script", "en": "Scripts"},
+    "domain_automation": {"it": "Automazioni", "en": "Automations"},
+    "automation_disabled": {"it": "disattivata", "en": "disabled"},
+    "runnables_title": {
+        "it": "▶️ <b>Cosa posso eseguire</b>",
+        "en": "▶️ <b>What I can run</b>",
+    },
+    "run_tap_hint": {
+        "it": "<i>Tocca un bottone per eseguirlo, oppure usa <code>/esegui nome</code>.</i>",
+        "en": "<i>Tap a button to run it, or use <code>/run name</code>.</i>",
+    },
+    "no_runnables": {
+        "it": "Non ho trovato scene, script o automazioni in Home Assistant.",
+        "en": "I found no scenes, scripts or automations in Home Assistant.",
+    },
+    "nothing_to_run": {
+        "it": "Non ho trovato niente da eseguire per «{query}».",
+        "en": "I found nothing to run for “{query}”.",
+    },
+    "which_to_run": {"it": "Quale vuoi eseguire?", "en": "Which one do you want to run?"},
+    # The confirmation says "started", not "done": Home Assistant answers as soon as
+    # it has accepted the call, and a script can keep running for minutes afterwards.
+    "result_run": {
+        "it": "{icon} <b>{what}</b> avviata.",
+        "en": "{icon} <b>{what}</b> started.",
+    },
+    "toast_run": {"it": "▶️ Avviata", "en": "▶️ Started"},
     # --- temperature
     "no_temp_sensors_for": {
         "it": "Non ho trovato sensori di temperatura per «{query}».",
@@ -313,13 +347,14 @@ MARKERS: dict[str, str] = {
         r"spenta|spente|spento|disattiva|disattivare|luci|luce|lampada|lampade|temperatura|"
         r"gradi|umidita|caldo|freddo|stanza|stanze|casa|appartamento|ovunque|"
         r"tutta|tutte|tutti|tutto|della|dello|delle|dei|degli|nella|nello|quanti|quanto|"
-        r"quale|quali|sono|adesso|dimmi|dammi|puoi|potresti|grazie|favore|che|cosa)\b"
+        r"quale|quali|sono|adesso|dimmi|dammi|puoi|potresti|grazie|favore|che|cosa|"
+        r"esegui|eseguire|lancia|lanciare|avvia|avviare|scena|scene|automazione|automazioni)\b"
     ),
     "en": (
         r"\b(turn|switch|lights|light|lamp|lamps|degrees|warm|cold|hot|humidity|"
         r"humid|room|rooms|house|home|apartment|flat|everything|everywhere|every|all|the|"
         r"what|whats|which|how|is|are|please|thanks|thank|you|can|could|would|tell|"
-        r"anything|on|off|now|my)\b"
+        r"anything|on|off|now|my|run|execute|trigger|launch|automation|automations)\b"
     ),
 }
 
@@ -398,6 +433,10 @@ HOME_TOKEN = "casa"
 _IT = {
     "temperature": r"\b(temperatur\w*|caldo|freddo|umidit\w*|gradi)\b",
     "on": r"\b(accendi|accende|accendere|attiva|attivare)\b",
+    # "esegui la scena cinema" must not be read as a turn-on command, so the run
+    # verbs are their own rule, checked first. "attiva" stays with "on": it is far
+    # more often said of a light than of a scene, and /esegui covers the rest.
+    "run": r"\b(esegui|eseguire|esegue|lancia|lanciare|avvia|avviare|fai partire|manda in esecuzione)\b",
     "off": r"\b(spegni|spegnere|spenta|disattiva|disattivare)\b",
     "lights": r"\b(luci|luce|lampad\w*)\b",
     "on_state": r"\b(acces\w+)\b",
@@ -408,6 +447,7 @@ _IT = {
     ),
     "strip": (
         r"\b(accendi|accende|accendere|attiva|attivare|spegni|spegnere|disattiva|disattivare|"
+        r"esegui|eseguire|esegue|lancia|lanciare|avvia|avviare|fai partire|manda in esecuzione|"
         r"la|le|lo|il|l|luce|luci|lampada|lampade|del|della|dello|dei|delle|di|in|nel|nella|"
         r"al|alla|allo|a|dell|nell|all|sull|per favore|grazie|mi|puoi|potresti|tutte|tutti|"
         r"stanza|adesso|ora|tutta|tutto)\b"
@@ -419,6 +459,9 @@ _EN = {
     "temperature": r"\b(temperature|temp|degrees|warm|cold|hot|humidity|humid|chilly|freezing)\b",
     "on": r"\bon\b",
     "off": r"\boff\b",
+    # Checked before "off" and "on", or "run the good night scene" would match
+    # neither and "trigger the wake up automation" would be read as a turn-on.
+    "run": r"\b(run|execute|trigger|launch|activate|start|play)\b",
     "lights": r"\b(lights?|lamps?)\b",
     "on_state": r"\bon\b",
     "ask": r"\b(what|whats|which|how many|anything|is|are)\b",
@@ -429,6 +472,7 @@ _EN = {
     ),
     "strip": (
         r"\b(turn|turns|switch|switches|put|flip|toggle|on|off|up|down|the|a|an|all|every|"
+        r"run|execute|trigger|launch|activate|start|play|"
         r"everything|everywhere|whole|house|home|apartment|flat|light|lights|lamp|lamps|"
         r"in|at|of|to|into|for|my|our|room|rooms|please|thanks|thank|you|can|could|would|"
         r"kindly|now|is|are|be|s|me)\b"
@@ -449,6 +493,7 @@ PATTERNS: dict[str, dict[str, str]] = {"it": _IT, "en": _EN}
 RULES: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {
     "it": (
         ("temperature", (_IT["temperature"],)),
+        ("run", (_IT["run"],)),
         ("on", (_IT["on"],)),
         ("off", (_IT["off"],)),
         ("lights_on", (_IT["lights"], _IT["on_state"])),
@@ -457,6 +502,7 @@ RULES: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {
     "en": (
         ("temperature", (_EN["temperature"],)),
         ("lights_on", (_EN["ask"], _EN["on_state"])),
+        ("run", (_EN["run"],)),
         ("off", (_EN["off"],)),
         ("on", (_EN["on"],)),
         ("lights", (_EN["lights"],)),
@@ -523,9 +569,9 @@ def parse(low: str, lang: str) -> tuple[str | None, str]:
 
     Returns:
         ``(intent, target)`` where intent is one of ``"temperature"``,
-        ``"on"``, ``"off"``, ``"lights_on"``, ``"lights"``, or ``None`` when no
-        rule matched. The target is the residual text -- a room, an entity
-        name, :data:`HOME_TOKEN`, or the empty string.
+        ``"on"``, ``"off"``, ``"lights_on"``, ``"lights"``, ``"run"``, or
+        ``None`` when no rule matched. The target is the residual text -- a room,
+        an entity name, :data:`HOME_TOKEN`, or the empty string.
 
     Examples:
         >>> parse("accendi la luce dello studio", "it")
@@ -542,6 +588,10 @@ def parse(low: str, lang: str) -> tuple[str | None, str]:
         ('off', 'casa')
         >>> parse("which lights are on", "en")
         ('lights_on', '')
+        >>> parse("esegui la scena cinema", "it")
+        ('run', 'scena cinema')
+        >>> parse("run the good night scene", "en")
+        ('run', 'good night scene')
     """
     p = PATTERNS.get(lang, _IT)
     for intent, patterns in RULES.get(lang, RULES["it"]):

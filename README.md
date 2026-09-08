@@ -50,10 +50,12 @@ niente Home Assistant. Dettagli in [docs/development.md](docs/development.md#tes
 | `/temperatura` | temperature e umidità di tutte le stanze (come `/temperatura casa`) |
 | `/temperatura bagno` | solo quella stanza |
 | `/stato <nome>` | stato di una qualsiasi entità (anche sensori, prese, climate) |
+| `/esegui` | elenca scene, script e automazioni, con un bottone per ciascuno |
+| `/esegui cinema` | esegue quella scena, quello script o quell'automazione |
 | `/lingua it\|en` | fissa la lingua della chat (`/language` è lo stesso comando) |
 
 Ogni comando ha un alias inglese: `/lights`, `/whatson`, `/on`, `/off`,
-`/temperature`, `/state`, `/language`. **Il nome che usi è già un segnale di
+`/temperature`, `/state`, `/run`, `/language`. **Il nome che usi è già un segnale di
 lingua**: `/luci` risponde in italiano, `/lights` in inglese.
 
 **«casa» vale come tutte le stanze insieme** — valgono anche *tutto*, *tutta la casa*, *tutte le stanze*,
@@ -61,13 +63,23 @@ lingua**: `/luci` risponde in italiano, `/lights` in inglese.
 così il conteggio nella risposta è quello reale.
 
 Funziona anche in linguaggio naturale: *«accendi la luce dello studio»*, *«spegni le luci del salone»*,
-*«che temperatura c'è in camera da letto?»*, *«quanti gradi in salone»*, *«accendi tutto»*, *«spegni tutte le luci»*.
+*«che temperatura c'è in camera da letto?»*, *«quanti gradi in salone»*, *«accendi tutto»*, *«spegni tutte le luci»*,
+*«esegui la scena cinema»*, *«lancia lo script buonanotte»*.
+
+### Scene, script e automazioni
+
+`/esegui` è l'unico comando che **avvia** qualcosa invece di accenderlo, e sceglie il servizio giusto per
+ogni dominio: `scene.turn_on` per una scena, `script.turn_on` per uno script e `automation.trigger` per
+un'automazione — non `automation.turn_on`, che si limiterebbe ad *abilitarla* senza eseguirla.
+Un'automazione disattivata resta eseguibile a mano ed è segnalata come tale nell'elenco.
+Scene, script e automazioni non fanno mai parte di `/accendi`, `/spegni` o `/luci`: «spegni casa» non può
+raggiungerle.
 
 ## Bilingue 🇮🇹 🇬🇧
 
 Scrivi in inglese e il bot passa all'inglese, senza configurare niente:
 *«turn on the light in the study»*, *«turn everything off»*, *«how warm is it in
-the bedroom?»*, *«which lights are on»*. La lingua riconosciuta diventa quella
+the bedroom?»*, *«which lights are on»*, *«run the cinema scene»*. La lingua riconosciuta diventa quella
 della chat, quindi valgono anche per i bottoni e per i vocali; `/lingua it` o
 `/language en` la fissano a mano.
 

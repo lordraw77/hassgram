@@ -18,8 +18,12 @@ Three entry points converge on the same execution path::
                                                                           |
     button tap ---> on_callback -> _handle_callback ----------------------+
 
-Every path ends in :meth:`HassBot._call_on_ids`, which groups entity ids by
-domain and calls one Home Assistant service per domain.
+Every switching path ends in :meth:`HassBot._call_on_ids`, which groups entity
+ids by domain and calls one Home Assistant service per domain. The executing
+path -- ``/esegui``, "esegui la scena cinema", a ``run:`` button -- ends in
+:meth:`HassBot._run_ids` instead, which does the same grouping but picks the
+service per domain: a scene and a script are started with ``turn_on``, an
+automation with ``trigger``.
 
 Cross-cutting rules
 -------------------
@@ -89,6 +93,21 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("hassgram")
 
 LIGHT_DOMAINS = ("light", "switch")
+
+# Domains the bot can *execute*, as opposed to switch. They are kept out of
+# LIGHT_DOMAINS on purpose: a scene is not a lamp, and "spegni casa" must never
+# reach one. The service each domain is run with differs -- calling
+# ``automation.turn_on`` would only *enable* the automation, not run it, which is
+# the single most confusing thing this feature could do.
+RUN_SERVICES: dict[str, str] = {
+    "scene": "turn_on",
+    "script": "turn_on",
+    "automation": "trigger",
+}
+RUN_DOMAINS: tuple[str, ...] = tuple(RUN_SERVICES)
+RUN_ICONS: dict[str, str] = {"scene": "\U0001f3ac", "script": "\U0001f4dc", "automation": "\u2699\ufe0f"}
+RUN_ICON_DEFAULT = "\u25b6\ufe0f"  # a domain added to RUN_SERVICES without an icon still gets a button
+
 MAX_BUTTONS = 24
 MAX_VOICE_BYTES = 5 * 1024 * 1024  # ~5 minutes of ogg/opus: past that it is almost certainly not a command
 MAX_MESSAGE_CHARS = 4000  # Telegram stops at 4096: leave room for the truncation notice
@@ -101,8 +120,9 @@ MAX_CHAT_LANGS = 500  # remembered languages: an LRU, for the same reason as the
 # to English because someone typed /on would be worse than doing nothing.
 COMMAND_LANG: dict[str, str] = {
     "luci": "it", "accese": "it", "accendi": "it", "spegni": "it",
-    "temperatura": "it", "stato": "it", "aiuto": "it", "lingua": "it",
+    "temperatura": "it", "stato": "it", "aiuto": "it", "lingua": "it", "esegui": "it",
     "lights": "en", "whatson": "en", "state": "en", "language": "en", "temperature": "en",
+    "run": "en",
 }
 
 # Telegram caps callback_data at 64 bytes, so buttons carry a token and the real
@@ -418,6 +438,32 @@ class HassBot:
             if s["entity_id"].startswith(prefixes)
             and (area is None or (areas or {}).get(s["entity_id"]) == area)
         ]
+
+    @staticmethod
+    def _runnables(
+        states: list[dict[str, Any]],
+        domains: tuple[str, ...] = RUN_DOMAINS,
+    ) -> list[dict[str, Any]]:
+        """Select the executable entities -- scenes, scripts and automations.
+
+        The counterpart of :meth:`_lights` for the ``/esegui`` side of the bot, and
+        the one place the "what can be run" question is answered, so the listing,
+        the search and the callbacks cannot drift apart on it.
+
+        Args:
+            states: A full snapshot from :meth:`snapshot`.
+            domains: Which domains count. Defaults to every key of
+                :data:`RUN_SERVICES`; a caller can narrow it to, say, ``("scene",)``.
+
+        Returns:
+            The matching entities sorted by domain and then by friendly name, so a
+            listing groups the scenes together and the order does not follow the
+            arbitrary order of a Home Assistant snapshot.
+        """
+        prefixes = tuple(f"{d}." for d in domains)
+        found = [s for s in states if s["entity_id"].startswith(prefixes)]
+        order = {d: i for i, d in enumerate(RUN_DOMAINS)}
+        return sorted(found, key=lambda s: (order.get(s["entity_id"].split(".")[0], 99), ent.friendly_name(s)))
 
     @staticmethod
     def _temp_sensors(
@@ -753,6 +799,149 @@ class HassBot:
             )
         await self.reply(update, "\n".join(lines), lang)
 
+    async def cmd_run(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle ``/esegui [nome]`` and ``/run [name]``: run a scene, script or automation.
+
+        The only *executing* command of the bot, as opposed to the switching ones:
+        it starts something that then runs on its own. With no argument it lists
+        what is available, since nobody remembers the name of every automation they
+        wrote.
+        """
+        if not await self.guard(update):
+            return
+        await self._run(update, " ".join(ctx.args or []).strip(), self.resolve_lang(update))
+
+    async def _run(self, update: Update, query: str, lang: str) -> None:
+        """Resolve what the user wants to run, and run it.
+
+        Targets are resolved with the same ladder as :meth:`_switch`, minus the room
+        and whole-house rules -- a scene has no area, and "run the whole house" means
+        nothing:
+
+        1. **No query** -- list everything runnable, with a button per entity.
+        2. **A single entity**, when the search returns one result or the top
+           result's name matches the query exactly.
+        3. **Several candidates** -- a keyboard, one button each. Nothing runs until
+           the user picks. There is deliberately no "all of them" button: firing
+           every matching automation at once is never what someone meant.
+
+        Args:
+            update: The update to reply to.
+            query: What to run: a scene, script or automation name. Empty lists.
+            lang: Language to answer in.
+
+        Note:
+            Authorisation is *not* checked here, as for every other ``_*`` method:
+            both callers -- ``/esegui`` and the natural-language path -- have already
+            done it.
+        """
+        states, areas = await self.snapshot()
+        runnables = self._runnables(states)
+        if not runnables:
+            await self.reply(update, t(lang, "no_runnables"), lang)
+            return
+
+        if not query:
+            await self.reply(
+                update,
+                self._runnables_text(runnables, lang),
+                lang,
+                reply_markup=self._run_keyboard(runnables, lang),
+            )
+            return
+
+        found = ent.search(query, runnables, areas, domains=RUN_DOMAINS, limit=MAX_BUTTONS)
+        if not found:
+            await self.reply(update, t(lang, "nothing_to_run", query=esc(query)), lang)
+            return
+        if len(found) == 1 or ent.normalize(ent.friendly_name(found[0])) == ent.normalize(query):
+            await self._execute(update, found[0], lang)
+            return
+        await self.reply(
+            update,
+            t(lang, "which_to_run"),
+            lang,
+            reply_markup=self._run_keyboard(found, lang),
+        )
+
+    async def _execute(self, update: Update, target: dict[str, Any], lang: str) -> None:
+        """Run one entity and confirm it in the chat.
+
+        Args:
+            update: The update to reply to.
+            target: The entity to run.
+            lang: Language to confirm in.
+
+        Note:
+            The confirmation says the run was *started*, not that it finished:
+            Home Assistant returns as soon as it has accepted the call, and a script
+            with a ten-minute delay in it is still running long after the user has
+            read the reply.
+        """
+        entity_id = target["entity_id"]
+        await self._run_ids([entity_id])
+        icon = RUN_ICONS.get(entity_id.split(".")[0], RUN_ICON_DEFAULT)
+        await self.reply(update, t(lang, "result_run", icon=icon, what=esc(ent.friendly_name(target))), lang)
+
+    @staticmethod
+    def _runnables_text(runnables: list[dict[str, Any]], lang: str = i18n.DEFAULT_LANG) -> str:
+        """Render the listing of everything that can be run.
+
+        Grouped by domain rather than by room, which is the only grouping that means
+        anything here: scenes, scripts and automations are three different kinds of
+        thing, and almost none of them are assigned to an area.
+
+        Args:
+            runnables: The entities to list, already sorted by :meth:`_runnables`.
+            lang: Language for the headings.
+
+        Returns:
+            The message body, HTML-escaped. Disabled automations are marked, since a
+            disabled automation can still be triggered by hand and the user should
+            know that is what they are doing.
+        """
+        lines = [t(lang, "runnables_title"), ""]
+        for domain in RUN_DOMAINS:
+            group = [s for s in runnables if s["entity_id"].startswith(f"{domain}.")]
+            if not group:
+                continue
+            lines.append(f"{RUN_ICONS[domain]} <b>{t(lang, f'domain_{domain}')}</b>")
+            for s in group:
+                off = domain == "automation" and not ent.is_on(s)
+                suffix = f" <i>({t(lang, 'automation_disabled')})</i>" if off else ""
+                lines.append(f"• {esc(ent.friendly_name(s))}{suffix}\n  <code>{esc(s['entity_id'])}</code>")
+            lines.append("")
+        lines.append(t(lang, "run_tap_hint"))
+        return "\n".join(lines)
+
+    @staticmethod
+    def _run_keyboard(runnables: list[dict[str, Any]], lang: str = i18n.DEFAULT_LANG) -> InlineKeyboardMarkup:
+        """Build a keyboard that runs one entity per button.
+
+        Unlike :meth:`_lights_keyboard` there is no bulk button and no refresh
+        button: running everything at once is never the intent, and there is no
+        state to refresh -- a scene has no "on" to display.
+
+        Args:
+            runnables: The entities to offer, capped at :data:`MAX_BUTTONS`.
+            lang: Unused today, accepted so the signature matches the other keyboard
+                builders and stays stable if a trailing button is ever added.
+
+        Returns:
+            The keyboard, one ``run:<token>`` button per entity.
+        """
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        f"{RUN_ICONS.get(s['entity_id'].split('.')[0], RUN_ICON_DEFAULT)} {ent.friendly_name(s)[:28]}",
+                        callback_data=f"run:{tok(s['entity_id'])}",
+                    )
+                ]
+                for s in runnables[:MAX_BUTTONS]
+            ]
+        )
+
     # --------------------------------------------------------------- actions
     async def _switch(self, update: Update, query: str, turn_on: bool, lang: str) -> None:
         """Resolve what the user meant and turn it on or off.
@@ -883,6 +1072,35 @@ class HassBot:
             by_domain.setdefault(entity_id.split(".")[0], []).append(entity_id)
         for domain, group in by_domain.items():
             await self.ha.call_service(domain, service, {"entity_id": group})
+
+    async def _run_ids(self, ids: list[str]) -> None:
+        """Execute a set of scenes, scripts or automations.
+
+        Like :meth:`_call_on_ids` this buckets by domain and issues one call per
+        bucket, but the service is not the same for every bucket: a scene and a
+        script are *started* with ``turn_on``, whereas an automation needs
+        ``trigger``. ``automation.turn_on`` would merely enable it -- the automation
+        would then fire at its own trigger, minutes or days later, which reads as
+        "nothing happened" to whoever asked.
+
+        Args:
+            ids: Full entity ids. Ids outside :data:`RUN_SERVICES` are skipped rather
+                than guessed at: there is no safe default service for an unknown
+                domain, and silently calling ``turn_on`` on one could do anything.
+
+        Raises:
+            ha_client.HomeAssistantError: If any call fails. As in
+                :meth:`_call_on_ids`, earlier calls are not rolled back.
+        """
+        by_domain: dict[str, list[str]] = {}
+        for entity_id in ids:
+            domain = entity_id.split(".")[0]
+            if domain in RUN_SERVICES:
+                by_domain.setdefault(domain, []).append(entity_id)
+            else:
+                log.warning("Not a runnable entity, skipped: %s", entity_id)
+        for domain, group in by_domain.items():
+            await self.ha.call_service(domain, RUN_SERVICES[domain], {"entity_id": group})
 
     async def _apply(self, update: Update, targets: list[dict[str, Any]], turn_on: bool, lang: str, title: str | None = None) -> None:
         """Execute a switch operation and confirm it in the chat.
@@ -1255,6 +1473,10 @@ class HassBot:
         ``do:<on|off>:<t>``   Switch one entity, then re-render the message.
         ``all:<on|off>:<t>``  Switch every entity in the token, then re-render.
         ``refresh:<t>``       Re-read the states and re-render the message.
+        ``run:<t>``           Run one scene, script or automation. The message is
+                              left untouched: the keyboard is a menu, not a status
+                              display, so re-rendering it would only take the other
+                              options away.
         ===================== =========================================================
 
         Every branch answers the query -- Telegram keeps a spinner on the button until
@@ -1312,6 +1534,14 @@ class HassBot:
             toast = t(lang, "toast_on" if turn_on else "toast_off")
             await query.answer(toast + (f" ({len(ids)})" if len(ids) > 1 else ""))
             await self._refresh_message(query, ids, lang)
+            return
+
+        if kind == "run":
+            entity_id = await self._resolve_token(query, rest, lang)
+            if entity_id is None:
+                return
+            await self._run_ids([entity_id])
+            await query.answer(t(lang, "toast_run"))
             return
 
         if kind == "refresh":
@@ -1393,8 +1623,9 @@ class HassBot:
         returns a language-independent intent. Everything below this point is
         therefore identical for both languages -- only the vocabulary differs.
 
-        The five intents are ``temperature``, ``on``, ``off``, ``lights_on``
-        (list what is currently on) and ``lights`` (browse). A sentence matching
+        The six intents are ``temperature``, ``on``, ``off``, ``lights_on``
+        (list what is currently on), ``lights`` (browse) and ``run`` (execute a
+        scene, script or automation). A sentence matching
         none of them is quoted back so the user can see how it was understood --
         especially useful after a transcription -- along with a pointer to the
         commands.
@@ -1428,6 +1659,9 @@ class HassBot:
             return
         if intent == "lights":
             await self._lights_browse(update, target, lang, overview_on_miss=True)
+            return
+        if intent == "run":
+            await self._run(update, target, lang)
             return
 
         hint = t(lang, "voice_hint") if spoken else ""
@@ -1670,6 +1904,7 @@ def main() -> None:
     app.add_handler(CommandHandler(["spegni", "off"], hass.cmd_off))
     app.add_handler(CommandHandler(["temperatura", "temperature", "temp"], hass.cmd_temperature))
     app.add_handler(CommandHandler(["stato", "state"], hass.cmd_state))
+    app.add_handler(CommandHandler(["esegui", "run"], hass.cmd_run))
     app.add_handler(CommandHandler(["lingua", "language"], hass.cmd_language))
     app.add_handler(CallbackQueryHandler(hass.on_callback))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO | filters.VIDEO_NOTE, hass.on_voice))

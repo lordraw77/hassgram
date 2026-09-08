@@ -778,6 +778,141 @@ async def _done():
     return None
 
 
+# ------------------------------------------------------- running things
+class RunCommandTest(BotTestCase):
+    """``/esegui``: listing, resolution, and the service each domain is run with."""
+
+    async def test_no_argument_lists_every_runnable_grouped_by_domain(self):
+        update = FakeUpdate()
+        await self.b.cmd_run(update, context([]))
+        text = update.effective_message.last
+        for name in ("Cinema", "Buonanotte", "Risveglio", "Vacanza"):
+            self.assertIn(name, text)
+        self.assertIn(i18n.t("it", "domain_scene"), text)
+        self.assertIn(i18n.t("it", "domain_script"), text)
+        self.assertIn(i18n.t("it", "domain_automation"), text)
+        self.assertEqual(self.b.ha.calls, [])
+
+    async def test_the_listing_marks_a_disabled_automation(self):
+        update = FakeUpdate()
+        await self.b.cmd_run(update, context([]))
+        line = next(l for l in update.effective_message.last.splitlines() if "Vacanza" in l)
+        self.assertIn(i18n.t("it", "automation_disabled"), line)
+        other = next(l for l in update.effective_message.last.splitlines() if "Risveglio" in l)
+        self.assertNotIn(i18n.t("it", "automation_disabled"), other)
+
+    async def test_the_listing_offers_one_run_button_per_entity(self):
+        update = FakeUpdate()
+        await self.b.cmd_run(update, context([]))
+        data = payloads(update.effective_message.markup)
+        self.assertEqual(len(data), 4)
+        self.assertTrue(all(d.startswith("run:") for d in data))
+
+    async def test_a_scene_is_started_with_turn_on(self):
+        update = FakeUpdate()
+        await self.b.cmd_run(update, context(["cinema"]))
+        self.assertEqual(self.b.ha.calls, [("scene", "turn_on", ["scene.cinema"])])
+
+    async def test_a_script_is_started_with_turn_on(self):
+        update = FakeUpdate()
+        await self.b.cmd_run(update, context(["buonanotte"]))
+        self.assertEqual(self.b.ha.calls, [("script", "turn_on", ["script.buonanotte"])])
+
+    async def test_an_automation_is_triggered_not_turned_on(self):
+        """The whole point of the feature: turn_on would only enable it."""
+        update = FakeUpdate()
+        await self.b.cmd_run(update, context(["risveglio"]))
+        self.assertEqual(self.b.ha.calls, [("automation", "trigger", ["automation.risveglio"])])
+
+    async def test_a_disabled_automation_can_still_be_triggered_by_hand(self):
+        update = FakeUpdate()
+        await self.b.cmd_run(update, context(["vacanza"]))
+        self.assertEqual(self.b.ha.calls, [("automation", "trigger", ["automation.vacanza"])])
+
+    async def test_the_confirmation_names_what_was_started(self):
+        update = FakeUpdate()
+        await self.b.cmd_run(update, context(["cinema"]))
+        self.assertIn("Cinema", update.effective_message.last)
+
+    async def test_an_unknown_name_runs_nothing_and_says_so(self):
+        update = FakeUpdate()
+        await self.b.cmd_run(update, context(["cioccolato"]))
+        self.assertEqual(self.b.ha.calls, [])
+        self.assertIn("cioccolato", update.effective_message.last)
+
+    async def test_a_house_with_nothing_runnable_says_so(self):
+        b = make_bot(ha=FakeHA(states=[s for s in house() if not s["entity_id"].startswith(
+            ("scene.", "script.", "automation."))]))
+        update = FakeUpdate()
+        await b.cmd_run(update, context([]))
+        self.assertEqual(update.effective_message.last, i18n.t("it", "no_runnables"))
+
+    async def test_an_ambiguous_name_offers_a_choice_and_runs_nothing(self):
+        states = house() + [
+            {"entity_id": "script.cinema_pausa", "state": "off",
+             "attributes": {"friendly_name": "Cinema pausa"}},
+        ]
+        b = make_bot(ha=FakeHA(states=states))
+        update = FakeUpdate()
+        # Not "cinema": that is the exact name of the scene, and an exact name wins
+        # over the ambiguity, exactly as it does for /accendi.
+        await b.cmd_run(update, context(["cinem"]))
+        self.assertEqual(b.ha.calls, [])
+        self.assertEqual(len(payloads(update.effective_message.markup)), 2)
+
+    async def test_an_exact_name_wins_over_the_ambiguity(self):
+        states = house() + [
+            {"entity_id": "script.cinema_pausa", "state": "off",
+             "attributes": {"friendly_name": "Cinema pausa"}},
+        ]
+        b = make_bot(ha=FakeHA(states=states))
+        await b.cmd_run(FakeUpdate(), context(["cinema"]))
+        self.assertEqual(b.ha.calls, [("scene", "turn_on", ["scene.cinema"])])
+
+    def test_a_light_is_never_in_the_runnable_pool(self):
+        """The pool is domain-filtered, so no fuzzy match can ever reach a lamp."""
+        ids = [s["entity_id"] for s in bot.HassBot._runnables(house())]
+        self.assertEqual(
+            ids, ["scene.cinema", "script.buonanotte", "automation.risveglio", "automation.vacanza"]
+        )
+
+    def test_every_runnable_domain_has_a_service_and_an_icon(self):
+        for domain in bot.RUN_DOMAINS:
+            self.assertIn(domain, bot.RUN_SERVICES)
+            self.assertIn(domain, bot.RUN_ICONS)
+            self.assertIn(f"domain_{domain}", i18n.MESSAGES)
+
+    async def test_the_run_keyboard_executes_the_entity_it_carries(self):
+        update = FakeUpdate()
+        await self.b.cmd_run(update, context([]))
+        data = next(d for d in payloads(update.effective_message.markup) if d.startswith("run:"))
+        query = FakeQuery(data)
+        await self.b._handle_callback(query, data, "it")
+        self.assertEqual(len(self.b.ha.calls), 1)
+        self.assertEqual(query.edits, [])  # a menu, not a status display: left untouched
+
+    async def test_an_expired_run_token_runs_nothing(self):
+        query = FakeQuery("run:deadbeef")
+        await self.b._handle_callback(query, query.data, "it")
+        self.assertEqual(self.b.ha.calls, [])
+        self.assertEqual(query.answers[0][0], i18n.t("it", "session_expired"))
+
+    async def test_run_ids_skips_a_domain_it_has_no_service_for(self):
+        with self.assertLogs("hassgram", level="WARNING"):
+            await self.b._run_ids(["light.cucina", "scene.cinema"])
+        self.assertEqual(self.b.ha.calls, [("scene", "turn_on", ["scene.cinema"])])
+
+    async def test_a_sentence_runs_a_scene(self):
+        update = FakeUpdate("esegui la scena cinema")
+        await self.b.on_text(update, context())
+        self.assertEqual(self.b.ha.calls, [("scene", "turn_on", ["scene.cinema"])])
+
+    async def test_an_english_sentence_runs_a_script(self):
+        update = FakeUpdate("run the buonanotte script please")
+        await self.b.on_text(update, context())
+        self.assertEqual(self.b.ha.calls, [("script", "turn_on", ["script.buonanotte"])])
+
+
 # ------------------------------------------------------------------- wiring
 class FakeApp:
     def __init__(self):
@@ -850,7 +985,7 @@ class MainTest(unittest.TestCase):
         commands = {c for h in app.handlers if isinstance(h, CommandHandler) for c in h.commands}
         for name in ("luci", "lights", "accese", "whatson", "accendi", "on", "spegni", "off",
                      "temperatura", "temperature", "stato", "state", "lingua", "language",
-                     "start", "help", "aiuto"):
+                     "start", "help", "aiuto", "esegui", "run"):
             self.assertIn(name, commands, name)
 
     def test_every_command_name_that_identifies_a_language_is_registered(self):

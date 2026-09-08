@@ -253,6 +253,41 @@ class TestParse(unittest.TestCase):
     def test_unknown_language_falls_back_to_the_default_grammar(self):
         self.assertEqual(i18n.parse("accendi lo studio", "de"), ("on", "studio"))
 
+    def test_italian_run_verbs_are_not_read_as_a_switch(self):
+        for sentence in ("esegui la scena cinema", "lancia lo script buonanotte",
+                         "avvia l'automazione risveglio"):
+            with self.subTest(sentence=sentence):
+                self.assertEqual(i18n.parse(sentence, "it")[0], "run")
+
+    def test_english_run_verbs_are_not_read_as_a_switch(self):
+        for sentence in ("run the cinema scene", "trigger the wake up automation",
+                         "execute the good night script"):
+            with self.subTest(sentence=sentence):
+                self.assertEqual(i18n.parse(sentence, "en")[0], "run")
+
+    def test_run_leaves_the_name_as_the_target(self):
+        self.assertEqual(i18n.parse("esegui cinema", "it"), ("run", "cinema"))
+        self.assertEqual(i18n.parse("run cinema", "en"), ("run", "cinema"))
+
+    def test_attiva_still_switches_rather_than_runs(self):
+        """It is said of a light far more often than of a scene; /esegui covers the rest."""
+        self.assertEqual(i18n.parse("attiva la luce dello studio", "it"), ("on", "studio"))
+
+    def test_the_run_rule_does_not_swallow_the_switching_sentences(self):
+        """The run rule is checked first, so the old intents must still win their own."""
+        cases = (
+            ("accendi le luci", "it", "on"),
+            ("spegni tutto", "it", "off"),
+            ("quali luci sono accese", "it", "lights_on"),
+            ("turn on the lamp", "en", "on"),
+            ("turn everything off", "en", "off"),
+            ("which lights are on", "en", "lights_on"),
+            ("quanti gradi in salone", "it", "temperature"),
+        )
+        for sentence, lang, expected in cases:
+            with self.subTest(sentence=sentence):
+                self.assertEqual(i18n.parse(sentence, lang)[0], expected)
+
 
 if __name__ == "__main__":
     unittest.main()

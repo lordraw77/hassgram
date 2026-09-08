@@ -72,14 +72,21 @@ log line it prints for unauthorised chats.
 | `/temperature` | temperature and humidity for every room |
 | `/temperature bathroom` | just that room |
 | `/state <name>` | state of any entity — sensors, switches, climate, anything |
+| `/run` | list every scene, script and automation, one button each |
+| `/run cinema` | run that scene, script or automation |
 | `/language it\|en` | pin the language of this chat |
 
+`/run` is the only command that *starts* something rather than switching it, and
+it picks the right service per domain: `scene.turn_on`, `script.turn_on` and
+`automation.trigger` — not `automation.turn_on`, which would merely enable the
+automation without running it.
+
 Every command has an Italian alias: `/luci`, `/accese`, `/accendi`, `/spegni`,
-`/temperatura`, `/stato`, `/lingua`. **The name you use is itself a language
+`/temperatura`, `/stato`, `/esegui`, `/lingua`. **The name you use is itself a language
 signal:** `/lights` answers in English, `/luci` in Italian.
 
 Plain sentences work too — *"turn everything off"*, *"how warm is it in the
-bedroom?"*, *"which lights are on"* — and so does **"home"** as a stand-in for
+bedroom?"*, *"which lights are on"*, *"run the cinema scene"* — and so does **"home"** as a stand-in for
 every room at once.
 
 ## Voice notes
