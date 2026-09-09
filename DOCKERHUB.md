@@ -55,7 +55,7 @@ unprivileged user (uid 10001).
 | `HA_STT_ENTITY` | no | speech-to-text entity, e.g. `stt.google_ai_stt`. Autodetected when unset |
 | `STT_LANGUAGE_IT` | no | language tag for Italian voice notes (default `it-IT`) |
 | `STT_LANGUAGE_EN` | no | language tag for English voice notes (default `en-US`) |
-| `RUNNABLES_REFRESH_SECONDS` | no | how often the scene/script/automation catalogue is re-read (default `300`; `0` reads it once at startup) |
+| `RUNNABLES_REFRESH_SECONDS` | no | how often the script/automation catalogue is re-read (default `300`; `0` reads it once at startup) |
 
 Get the access token from your Home Assistant profile page → Security →
 Long-lived access tokens. Get your chat id by messaging the bot and reading the
@@ -73,15 +73,17 @@ log line it prints for unauthorised chats.
 | `/temperature` | temperature and humidity for every room |
 | `/temperature bathroom` | just that room |
 | `/state <name>` | state of any entity — sensors, switches, climate, anything |
-| `/run` | list every scene, script and automation, one button each |
-| `/run cinema` | run that scene, script or automation |
+| `/run` | list every script and automation, one button each |
+| `/run goodnight` | run that script or automation |
 | `/language it\|en` | pin the language of this chat |
 
 `/run` is the only command that *starts* something rather than switching it, and
-it picks the right service per domain: `scene.turn_on`, `script.turn_on` and
+it picks the right service per domain: `script.turn_on` and
 `automation.trigger` — not `automation.turn_on`, which would merely enable the
-automation without running it. The catalogue it offers is read at startup and
-refreshed on a cycle, so the menu answers from memory.
+automation without running it. Scenes are not included: a scene is a set of
+states to apply, closer to the switching commands. The catalogue is read at startup and
+refreshed on a cycle, so the menu answers from memory, and a listing too long for
+one Telegram message is split across several rather than truncated.
 
 The commands above are also published to Telegram's own command menu at startup,
 in Italian and in English, so they show up as you type `/`.
@@ -91,7 +93,7 @@ Every command has an Italian alias: `/luci`, `/accese`, `/accendi`, `/spegni`,
 signal:** `/lights` answers in English, `/luci` in Italian.
 
 Plain sentences work too — *"turn everything off"*, *"how warm is it in the
-bedroom?"*, *"which lights are on"*, *"run the cinema scene"* — and so does **"home"** as a stand-in for
+bedroom?"*, *"which lights are on"*, *"run the good night script"* — and so does **"home"** as a stand-in for
 every room at once.
 
 ## Voice notes

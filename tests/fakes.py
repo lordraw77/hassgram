@@ -24,7 +24,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # its own area, a light with no friendly name and no area, a switch (which is a
 # light for /accendi but not for /luci), a room whose only temperature-shaped
 # entity is a decoy, a name that would break HTML if it were not escaped, and one
-# runnable entity per domain -- none of which is ever a light.
+# runnable entity per domain -- none of which is ever a light -- and a scene,
+# which is runnable in neither sense and must stay out of every listing.
 
 HOUSE: list[dict[str, Any]] = [
     {"entity_id": "light.salone_principale", "state": "on",
@@ -67,12 +68,16 @@ HOUSE: list[dict[str, Any]] = [
      "attributes": {"friendly_name": "Termostato",
                     "current_temperature": 20.4, "temperature": 21}},
     {"entity_id": "stt.whisper", "state": "idle", "attributes": {"friendly_name": "Whisper"}},
-    # Runnable entities: one per domain, plus a disabled automation, since a
-    # disabled automation can still be triggered by hand and must be marked as such.
+    # Runnable entities: one per supported domain, plus a disabled automation,
+    # since a disabled automation can still be triggered by hand and must be
+    # marked as such. The scene is the negative case: scenes are not runnable,
+    # so it must never reach /esegui.
     {"entity_id": "scene.cinema", "state": "unknown",
      "attributes": {"friendly_name": "Cinema"}},
     {"entity_id": "script.buonanotte", "state": "off",
      "attributes": {"friendly_name": "Buonanotte"}},
+    {"entity_id": "script.aperitivo", "state": "off",
+     "attributes": {"friendly_name": "Aperitivo"}},
     {"entity_id": "automation.risveglio", "state": "on",
      "attributes": {"friendly_name": "Risveglio"}},
     {"entity_id": "automation.vacanza", "state": "off",

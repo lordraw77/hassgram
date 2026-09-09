@@ -8,6 +8,7 @@ for. Nothing here needs a network, a token or an event loop of its own.
 from __future__ import annotations
 
 import asyncio
+import re
 import types
 import unittest
 from unittest import mock
@@ -768,7 +769,7 @@ class LifecycleTest(BotTestCase):
             await bot.post_init(fake_app(b))
         self.assertEqual(
             [s["entity_id"] for s in await b.runnables()],
-            ["scene.cinema", "script.buonanotte", "automation.risveglio", "automation.vacanza"],
+            ["script.aperitivo", "script.buonanotte", "automation.risveglio", "automation.vacanza"],
         )
 
     async def test_post_init_starts_and_post_shutdown_stops_the_refresh_cycle(self):
@@ -835,12 +836,18 @@ class RunCommandTest(BotTestCase):
         update = FakeUpdate()
         await self.b.cmd_run(update, context([]))
         text = update.effective_message.last
-        for name in ("Cinema", "Buonanotte", "Risveglio", "Vacanza"):
+        for name in ("Aperitivo", "Buonanotte", "Risveglio", "Vacanza"):
             self.assertIn(name, text)
-        self.assertIn(i18n.t("it", "domain_scene"), text)
         self.assertIn(i18n.t("it", "domain_script"), text)
         self.assertIn(i18n.t("it", "domain_automation"), text)
         self.assertEqual(self.b.ha.calls, [])
+
+    async def test_a_scene_is_never_listed(self):
+        """Scenes are not runnable: a scene in the house must not reach the menu."""
+        update = FakeUpdate()
+        await self.b.cmd_run(update, context([]))
+        self.assertNotIn("Cinema", update.effective_message.last)
+        self.assertNotIn("scene.", update.effective_message.last)
 
     async def test_the_listing_marks_a_disabled_automation(self):
         update = FakeUpdate()
@@ -854,13 +861,15 @@ class RunCommandTest(BotTestCase):
         update = FakeUpdate()
         await self.b.cmd_run(update, context([]))
         data = payloads(update.effective_message.markup)
-        self.assertEqual(len(data), 4)
+        self.assertEqual(len(data), 4)  # two scripts, two automations
         self.assertTrue(all(d.startswith("run:") for d in data))
 
-    async def test_a_scene_is_started_with_turn_on(self):
+    async def test_a_scene_is_not_runnable(self):
+        """Naming a scene finds nothing rather than turning it on."""
         update = FakeUpdate()
         await self.b.cmd_run(update, context(["cinema"]))
-        self.assertEqual(self.b.ha.calls, [("scene", "turn_on", ["scene.cinema"])])
+        self.assertEqual(self.b.ha.calls, [])
+        self.assertIn("cinema", update.effective_message.last)
 
     async def test_a_script_is_started_with_turn_on(self):
         update = FakeUpdate()
@@ -880,8 +889,8 @@ class RunCommandTest(BotTestCase):
 
     async def test_the_confirmation_names_what_was_started(self):
         update = FakeUpdate()
-        await self.b.cmd_run(update, context(["cinema"]))
-        self.assertIn("Cinema", update.effective_message.last)
+        await self.b.cmd_run(update, context(["buonanotte"]))
+        self.assertIn("Buonanotte", update.effective_message.last)
 
     async def test_an_unknown_name_runs_nothing_and_says_so(self):
         update = FakeUpdate()
@@ -891,38 +900,39 @@ class RunCommandTest(BotTestCase):
 
     async def test_a_house_with_nothing_runnable_says_so(self):
         b = make_bot(ha=FakeHA(states=[s for s in house() if not s["entity_id"].startswith(
-            ("scene.", "script.", "automation."))]))
+            ("script.", "automation."))]))
         update = FakeUpdate()
         await b.cmd_run(update, context([]))
         self.assertEqual(update.effective_message.last, i18n.t("it", "no_runnables"))
 
     async def test_an_ambiguous_name_offers_a_choice_and_runs_nothing(self):
         states = house() + [
-            {"entity_id": "script.cinema_pausa", "state": "off",
-             "attributes": {"friendly_name": "Cinema pausa"}},
+            {"entity_id": "script.buonanotte_estate", "state": "off",
+             "attributes": {"friendly_name": "Buonanotte estate"}},
         ]
         b = make_bot(ha=FakeHA(states=states))
         update = FakeUpdate()
-        # Not "cinema": that is the exact name of the scene, and an exact name wins
-        # over the ambiguity, exactly as it does for /accendi.
-        await b.cmd_run(update, context(["cinem"]))
+        # Not "buonanotte": that is the exact name of one script, and an exact name
+        # wins over the ambiguity, exactly as it does for /accendi.
+        await b.cmd_run(update, context(["buonanott"]))
         self.assertEqual(b.ha.calls, [])
         self.assertEqual(len(payloads(update.effective_message.markup)), 2)
 
     async def test_an_exact_name_wins_over_the_ambiguity(self):
         states = house() + [
-            {"entity_id": "script.cinema_pausa", "state": "off",
-             "attributes": {"friendly_name": "Cinema pausa"}},
+            {"entity_id": "script.buonanotte_estate", "state": "off",
+             "attributes": {"friendly_name": "Buonanotte estate"}},
         ]
         b = make_bot(ha=FakeHA(states=states))
-        await b.cmd_run(FakeUpdate(), context(["cinema"]))
-        self.assertEqual(b.ha.calls, [("scene", "turn_on", ["scene.cinema"])])
+        await b.cmd_run(FakeUpdate(), context(["buonanotte"]))
+        self.assertEqual(b.ha.calls, [("script", "turn_on", ["script.buonanotte"])])
 
-    def test_a_light_is_never_in_the_runnable_pool(self):
-        """The pool is domain-filtered, so no fuzzy match can ever reach a lamp."""
+    def test_only_scripts_and_automations_are_in_the_runnable_pool(self):
+        """The pool is domain-filtered, so no fuzzy match reaches a lamp or a scene."""
         ids = [s["entity_id"] for s in bot.HassBot._runnables(house())]
         self.assertEqual(
-            ids, ["scene.cinema", "script.buonanotte", "automation.risveglio", "automation.vacanza"]
+            ids,
+            ["script.aperitivo", "script.buonanotte", "automation.risveglio", "automation.vacanza"],
         )
 
     def test_every_runnable_domain_has_a_service_and_an_icon(self):
@@ -947,19 +957,128 @@ class RunCommandTest(BotTestCase):
         self.assertEqual(query.answers[0][0], i18n.t("it", "session_expired"))
 
     async def test_run_ids_skips_a_domain_it_has_no_service_for(self):
+        """A scene reaching _run_ids is a bug upstream: skip it, do not guess."""
         with self.assertLogs("hassgram", level="WARNING"):
-            await self.b._run_ids(["light.cucina", "scene.cinema"])
-        self.assertEqual(self.b.ha.calls, [("scene", "turn_on", ["scene.cinema"])])
+            await self.b._run_ids(["light.cucina", "scene.cinema", "script.buonanotte"])
+        self.assertEqual(self.b.ha.calls, [("script", "turn_on", ["script.buonanotte"])])
 
-    async def test_a_sentence_runs_a_scene(self):
-        update = FakeUpdate("esegui la scena cinema")
+    async def test_a_sentence_runs_an_automation(self):
+        update = FakeUpdate("esegui l'automazione risveglio")
         await self.b.on_text(update, context())
-        self.assertEqual(self.b.ha.calls, [("scene", "turn_on", ["scene.cinema"])])
+        self.assertEqual(self.b.ha.calls, [("automation", "trigger", ["automation.risveglio"])])
 
     async def test_an_english_sentence_runs_a_script(self):
         update = FakeUpdate("run the buonanotte script please")
         await self.b.on_text(update, context())
         self.assertEqual(self.b.ha.calls, [("script", "turn_on", ["script.buonanotte"])])
+
+
+# ------------------------------------------------------- listing in pages
+def catalogue(automations=0, scripts=0, name="Automazione numero {i:03d} descrittiva"):
+    """A catalogue of arbitrary size, for the paging tests."""
+    return (
+        [{"entity_id": f"script.p{i:03d}", "state": "off",
+          "attributes": {"friendly_name": f"Script {i:03d}"}} for i in range(scripts)]
+        + [{"entity_id": f"automation.a{i:03d}", "state": "on" if i % 3 else "off",
+            "attributes": {"friendly_name": name.format(i=i)}} for i in range(automations)]
+    )
+
+
+class RunnablesPagingTest(BotTestCase):
+    """A catalogue too big for one message is split, not truncated."""
+
+    async def send(self, states):
+        b = make_bot(ha=FakeHA(states=states), runnables_refresh=0)
+        update = FakeUpdate()
+        await b.cmd_run(update, context([]))
+        return update.effective_message.sent
+
+    async def test_a_small_catalogue_still_fits_one_message(self):
+        self.assertEqual(len(await self.send(house())), 1)
+
+    async def test_a_large_catalogue_is_split_across_messages(self):
+        sent = await self.send(catalogue(automations=70, scripts=5))
+        self.assertGreater(len(sent), 1)
+
+    async def test_no_page_is_ever_truncated(self):
+        for text, _ in await self.send(catalogue(automations=200)):
+            self.assertNotIn(i18n.t("it", "truncated"), text)
+
+    async def test_every_page_fits_telegram_s_limit(self):
+        for text, _ in await self.send(catalogue(automations=200)):
+            self.assertLessEqual(len(text), 4096)
+
+    async def test_every_entity_named_in_a_page_has_a_button_in_that_page(self):
+        """Text and keyboard are built from the same list, page by page."""
+        for text, kwargs in await self.send(catalogue(automations=70, scripts=5)):
+            named = re.findall(r"<code>((?:script|automation)\.[^<]+)</code>", text)
+            self.assertEqual(len(named), len(payloads(kwargs["reply_markup"])))
+
+    async def test_no_entity_is_dropped_and_none_is_listed_twice(self):
+        states = catalogue(automations=70, scripts=8)
+        listed = []
+        for text, _ in await self.send(states):
+            listed += re.findall(r"<code>((?:script|automation)\.[^<]+)</code>", text)
+        self.assertEqual(sorted(listed), sorted(s["entity_id"] for s in states))
+
+    async def test_a_continued_domain_repeats_its_heading(self):
+        sent = await self.send(catalogue(automations=70))
+        for text, _ in sent[1:]:
+            self.assertIn(i18n.t("it", "domain_automation"), text.splitlines()[0])
+
+    async def test_only_the_first_page_carries_the_title(self):
+        sent = await self.send(catalogue(automations=70))
+        self.assertIn(i18n.t("it", "runnables_title"), sent[0][0])
+        for text, _ in sent[1:]:
+            self.assertNotIn(i18n.t("it", "runnables_title"), text)
+
+    async def test_only_the_last_page_carries_the_hint(self):
+        sent = await self.send(catalogue(automations=70))
+        for text, _ in sent[:-1]:
+            self.assertNotIn(i18n.t("it", "run_tap_hint"), text)
+        self.assertIn(i18n.t("it", "run_tap_hint"), sent[-1][0])
+
+    async def test_a_pathological_catalogue_is_capped_and_says_so(self):
+        """The cap is a burst guard; unlike clip() it reports what it left out.
+
+        The catalogue is sized off the constants rather than off a round number, so
+        the test keeps testing the cap when either of them is retuned.
+        """
+        total = bot.MAX_RUN_PAGES * bot.MAX_BUTTONS + 7
+        sent = await self.send(catalogue(automations=total))
+        self.assertEqual(len(sent), bot.MAX_RUN_PAGES)
+        listed = sum(len(payloads(kw["reply_markup"])) for _, kw in sent)
+        self.assertLess(listed, total)
+        self.assertIn(str(total - listed), sent[-1][0])
+
+    async def test_a_catalogue_that_fits_the_cap_is_never_capped(self):
+        """One page short of the cap must still be listed in full."""
+        total = (bot.MAX_RUN_PAGES - 1) * bot.MAX_BUTTONS
+        sent = await self.send(catalogue(automations=total))
+        self.assertLessEqual(len(sent), bot.MAX_RUN_PAGES)
+        listed = sum(len(payloads(kw["reply_markup"])) for _, kw in sent)
+        self.assertEqual(listed, total)
+        capped = i18n.MESSAGES["run_list_capped"]["it"].split("{")[0]
+        for text, _ in sent:
+            self.assertNotIn(capped, text)
+
+    async def test_the_cap_holds_at_whatever_value_it_is_set_to(self):
+        with mock.patch.object(bot, "MAX_RUN_PAGES", 3):
+            sent = await self.send(catalogue(automations=3 * bot.MAX_BUTTONS + 5))
+        self.assertEqual(len(sent), 3)
+
+    def test_a_page_break_falls_on_the_character_budget(self):
+        """Not only on the entity count: long names must close a page early."""
+        states = catalogue(automations=40, name="{i:03d} " + "n" * 200)
+        pages = bot.HassBot._runnables_pages(states, "it")
+        self.assertTrue(any(len(page) < bot.MAX_BUTTONS for _, page in pages[:-1]))
+        for text, _ in pages:
+            self.assertLessEqual(len(text), bot.MAX_MESSAGE_CHARS)
+
+    def test_one_entity_per_page_still_produces_a_coherent_listing(self):
+        pages = bot.HassBot._runnables_pages(house(), "it", per_page=1)
+        self.assertEqual([len(page) for _, page in pages], [1, 1, 1, 1])
+        self.assertIn(i18n.t("it", "run_tap_hint"), pages[-1][0])
 
 
 # ------------------------------------------------ the runnable catalogue cache
@@ -981,7 +1100,7 @@ class RunnablesCacheTest(BotTestCase):
         update = FakeUpdate()
         await b.cmd_run(update, context([]))
         self.assertEqual(b.ha.state_reads, 1)
-        self.assertIn("Cinema", update.effective_message.last)
+        self.assertIn("Buonanotte", update.effective_message.last)
 
     async def test_the_menu_still_lists_while_home_assistant_is_down(self):
         """The point of caching: the catalogue outlives the instance being reachable."""
@@ -991,7 +1110,7 @@ class RunnablesCacheTest(BotTestCase):
         update = FakeUpdate()
         with self.assertLogs("hassgram", level="WARNING"):  # areas unavailable
             await b.cmd_run(update, context([]))
-        self.assertIn("Cinema", update.effective_message.last)
+        self.assertIn("Buonanotte", update.effective_message.last)
 
     async def test_running_while_home_assistant_is_down_still_fails_loudly(self):
         """Listing degrades gracefully; executing must not pretend to have worked."""
@@ -1000,18 +1119,18 @@ class RunnablesCacheTest(BotTestCase):
         b.ha.fail_with = HomeAssistantError("refused", kind="network")
         with self.assertLogs("hassgram", level="WARNING"), \
              self.assertRaises(HomeAssistantError):
-            await b.cmd_run(FakeUpdate(), context(["cinema"]))
+            await b.cmd_run(FakeUpdate(), context(["buonanotte"]))
         self.assertEqual(b.ha.calls, [])
 
-    async def test_a_refresh_picks_up_a_newly_created_scene(self):
+    async def test_a_refresh_picks_up_a_newly_created_script(self):
         b = make_bot(runnables_refresh=0)
         await b.refresh_runnables()
         b.ha._states = house() + [
-            {"entity_id": "scene.festa", "state": "unknown", "attributes": {"friendly_name": "Festa"}},
+            {"entity_id": "script.festa", "state": "off", "attributes": {"friendly_name": "Festa"}},
         ]
-        self.assertNotIn("scene.festa", [s["entity_id"] for s in await b.runnables()])
+        self.assertNotIn("script.festa", [s["entity_id"] for s in await b.runnables()])
         await b.refresh_runnables()
-        self.assertIn("scene.festa", [s["entity_id"] for s in await b.runnables()])
+        self.assertIn("script.festa", [s["entity_id"] for s in await b.runnables()])
 
     async def test_the_cycle_refreshes_and_survives_a_failed_read(self):
         b = make_bot(runnables_refresh=0.01)

@@ -60,11 +60,11 @@ MESSAGES: dict[str, dict[str, str]] = {
             "/temperatura [<i>stanza</i>] — es. <code>/temperatura salone</code>\n"
             "<i>«casa» vale come tutte le stanze insieme.</i>\n"
             "/stato <i>nome</i> — stato di una qualsiasi entità\n"
-            "/esegui [<i>nome</i>] — scene, script e automazioni; senza nome te le elenco\n"
+            "/esegui [<i>nome</i>] — script e automazioni; senza nome te li elenco\n"
             "/lingua <i>it|en</i> — cambia lingua\n\n"
             "Puoi anche scrivermi in linguaggio naturale: "
             "<i>«accendi la luce dello studio»</i>, <i>«che temperatura c'è in camera?»</i>, "
-            "<i>«esegui la scena cinema»</i>\n"
+            "<i>«esegui lo script buonanotte»</i>\n"
             "🎙 <b>Oppure mandami un vocale</b> con lo stesso comando: lo trascrivo con "
             "Home Assistant e lo eseguo.\n\n"
             "🇬🇧 <i>I speak English too — just write to me in English.</i>"
@@ -80,11 +80,11 @@ MESSAGES: dict[str, dict[str, str]] = {
             "/temperature [<i>room</i>] — e.g. <code>/temperature living room</code>\n"
             "<i>«house» means every room at once.</i>\n"
             "/state <i>name</i> — state of any entity\n"
-            "/run [<i>name</i>] — scenes, scripts and automations; with no name I list them\n"
+            "/run [<i>name</i>] — scripts and automations; with no name I list them\n"
             "/language <i>it|en</i> — switch language\n\n"
             "You can also just talk to me: "
             "<i>«turn on the light in the study»</i>, <i>«how warm is it in the bedroom?»</i>, "
-            "<i>«run the movie scene»</i>\n"
+            "<i>«run the good night script»</i>\n"
             "🎙 <b>Or send me a voice message</b> with the same command: I transcribe it "
             "with Home Assistant and run it.\n\n"
             "🇮🇹 <i>Parlo anche italiano — scrivimi pure in italiano.</i>"
@@ -146,12 +146,17 @@ MESSAGES: dict[str, dict[str, str]] = {
     "result_on_many": {"it": "{icon} <b>{what}</b> accese.", "en": "{icon} <b>{what}</b> turned on."},
     "result_off_one": {"it": "{icon} <b>{what}</b> spenta.", "en": "{icon} <b>{what}</b> turned off."},
     "result_off_many": {"it": "{icon} <b>{what}</b> spente.", "en": "{icon} <b>{what}</b> turned off."},
-    # --- running scenes, scripts and automations
+    # --- running scripts and automations
     "command_run": {"it": "esegui", "en": "run"},
-    "domain_scene": {"it": "Scene", "en": "Scenes"},
     "domain_script": {"it": "Script", "en": "Scripts"},
     "domain_automation": {"it": "Automazioni", "en": "Automations"},
     "automation_disabled": {"it": "disattivata", "en": "disabled"},
+    # Heading repeated at the top of a page that continues the previous one, so no
+    # message ever opens with an unlabelled list of names.
+    "domain_continued": {
+        "it": "{icon} <b>{domain}</b> <i>(segue)</i>",
+        "en": "{icon} <b>{domain}</b> <i>(continued)</i>",
+    },
     "runnables_title": {
         "it": "▶️ <b>Cosa posso eseguire</b>",
         "en": "▶️ <b>What I can run</b>",
@@ -161,14 +166,18 @@ MESSAGES: dict[str, dict[str, str]] = {
         "en": "<i>Tap a button to run it, or use <code>/run name</code>.</i>",
     },
     "no_runnables": {
-        "it": "Non ho trovato scene, script o automazioni in Home Assistant.",
-        "en": "I found no scenes, scripts or automations in Home Assistant.",
+        "it": "Non ho trovato script o automazioni in Home Assistant.",
+        "en": "I found no scripts or automations in Home Assistant.",
     },
     "nothing_to_run": {
         "it": "Non ho trovato niente da eseguire per «{query}».",
         "en": "I found nothing to run for “{query}”.",
     },
     "which_to_run": {"it": "Quale vuoi eseguire?", "en": "Which one do you want to run?"},
+    "run_list_capped": {
+        "it": "<i>… e altre {count}: cercale con <code>/esegui nome</code>.</i>",
+        "en": "<i>… and {count} more: find them with <code>/run name</code>.</i>",
+    },
     # The confirmation says "started", not "done": Home Assistant answers as soon as
     # it has accepted the call, and a script can keep running for minutes afterwards.
     "result_run": {
@@ -316,7 +325,7 @@ COMMAND_MENU: dict[str, tuple[tuple[str, str], ...]] = {
         ("accese", "Tutto quello che è acceso adesso"),
         ("accendi", "Accendi una luce, una stanza o casa"),
         ("spegni", "Spegni una luce, una stanza o casa"),
-        ("esegui", "Esegui una scena, uno script o un'automazione"),
+        ("esegui", "Esegui uno script o un'automazione"),
         ("temperatura", "Temperature e umidità, per stanza"),
         ("stato", "Stato di una qualsiasi entità"),
         ("lingua", "Cambia lingua: it o en"),
@@ -327,7 +336,7 @@ COMMAND_MENU: dict[str, tuple[tuple[str, str], ...]] = {
         ("whatson", "Everything that is on right now"),
         ("on", "Turn on a light, a room or the house"),
         ("off", "Turn off a light, a room or the house"),
-        ("run", "Run a scene, script or automation"),
+        ("run", "Run a script or an automation"),
         ("temperature", "Temperature and humidity, per room"),
         ("state", "State of any entity"),
         ("language", "Switch language: it or en"),
@@ -384,7 +393,7 @@ MARKERS: dict[str, str] = {
         r"gradi|umidita|caldo|freddo|stanza|stanze|casa|appartamento|ovunque|"
         r"tutta|tutte|tutti|tutto|della|dello|delle|dei|degli|nella|nello|quanti|quanto|"
         r"quale|quali|sono|adesso|dimmi|dammi|puoi|potresti|grazie|favore|che|cosa|"
-        r"esegui|eseguire|lancia|lanciare|avvia|avviare|scena|scene|automazione|automazioni)\b"
+        r"esegui|eseguire|lancia|lanciare|avvia|avviare|automazione|automazioni)\b"
     ),
     "en": (
         r"\b(turn|switch|lights|light|lamp|lamps|degrees|warm|cold|hot|humidity|"
@@ -469,9 +478,9 @@ HOME_TOKEN = "casa"
 _IT = {
     "temperature": r"\b(temperatur\w*|caldo|freddo|umidit\w*|gradi)\b",
     "on": r"\b(accendi|accende|accendere|attiva|attivare)\b",
-    # "esegui la scena cinema" must not be read as a turn-on command, so the run
-    # verbs are their own rule, checked first. "attiva" stays with "on": it is far
-    # more often said of a light than of a scene, and /esegui covers the rest.
+    # "esegui lo script buonanotte" must not be read as a turn-on command, so the
+    # run verbs are their own rule, checked first. "attiva" stays with "on": it is
+    # far more often said of a light than of a script, and /esegui covers the rest.
     "run": r"\b(esegui|eseguire|esegue|lancia|lanciare|avvia|avviare|fai partire|manda in esecuzione)\b",
     "off": r"\b(spegni|spegnere|spenta|disattiva|disattivare)\b",
     "lights": r"\b(luci|luce|lampad\w*)\b",
@@ -495,7 +504,7 @@ _EN = {
     "temperature": r"\b(temperature|temp|degrees|warm|cold|hot|humidity|humid|chilly|freezing)\b",
     "on": r"\bon\b",
     "off": r"\boff\b",
-    # Checked before "off" and "on", or "run the good night scene" would match
+    # Checked before "off" and "on", or "run the good night script" would match
     # neither and "trigger the wake up automation" would be read as a turn-on.
     "run": r"\b(run|execute|trigger|launch|activate|start|play)\b",
     "lights": r"\b(lights?|lamps?)\b",
@@ -624,10 +633,10 @@ def parse(low: str, lang: str) -> tuple[str | None, str]:
         ('off', 'casa')
         >>> parse("which lights are on", "en")
         ('lights_on', '')
-        >>> parse("esegui la scena cinema", "it")
-        ('run', 'scena cinema')
-        >>> parse("run the good night scene", "en")
-        ('run', 'good night scene')
+        >>> parse("esegui lo script buonanotte", "it")
+        ('run', 'script buonanotte')
+        >>> parse("run the good night script", "en")
+        ('run', 'good night script')
     """
     p = PATTERNS.get(lang, _IT)
     for intent, patterns in RULES.get(lang, RULES["it"]):

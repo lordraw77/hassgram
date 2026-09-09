@@ -20,10 +20,10 @@ Three entry points converge on the same execution path::
 
 Every switching path ends in :meth:`HassBot._call_on_ids`, which groups entity
 ids by domain and calls one Home Assistant service per domain. The executing
-path -- ``/esegui``, "esegui la scena cinema", a ``run:`` button -- ends in
-:meth:`HassBot._run_ids` instead, which does the same grouping but picks the
-service per domain: a scene and a script are started with ``turn_on``, an
-automation with ``trigger``.
+path -- ``/esegui``, "esegui lo script buonanotte", a ``run:`` button -- ends
+in :meth:`HassBot._run_ids` instead, which does the same grouping but picks the
+service per domain: a script is started with ``turn_on``, an automation with
+``trigger``.
 
 Cross-cutting rules
 -------------------
@@ -48,8 +48,8 @@ Callback payloads
 
 Startup state
     Two things are read once at startup and then kept: the speech-to-text engine
-    (:meth:`HassBot.discover_stt`) and the catalogue of scenes, scripts and
-    automations (:meth:`HassBot.refresh_runnables`), the latter refreshed every
+    (:meth:`HassBot.discover_stt`) and the catalogue of scripts and automations
+    (:meth:`HassBot.refresh_runnables`), the latter refreshed every
     ``RUNNABLES_REFRESH_SECONDS`` by a background task. ``/esegui`` is therefore
     answered from memory: the catalogue reflects the user's Home Assistant
     configuration, which changes when they edit it, not from minute to minute.
@@ -106,26 +106,36 @@ log = logging.getLogger("hassgram")
 LIGHT_DOMAINS = ("light", "switch")
 
 # Domains the bot can *execute*, as opposed to switch. They are kept out of
-# LIGHT_DOMAINS on purpose: a scene is not a lamp, and "spegni casa" must never
+# LIGHT_DOMAINS on purpose: a script is not a lamp, and "spegni casa" must never
 # reach one. The service each domain is run with differs -- calling
 # ``automation.turn_on`` would only *enable* the automation, not run it, which is
 # the single most confusing thing this feature could do.
+#
+# Scenes are deliberately absent: a scene is a set of states to apply, closer to
+# the switching commands than to the executing ones, and listing them here put
+# them in the same menu as the automations without behaving like them.
 RUN_SERVICES: dict[str, str] = {
-    "scene": "turn_on",
     "script": "turn_on",
     "automation": "trigger",
 }
 RUN_DOMAINS: tuple[str, ...] = tuple(RUN_SERVICES)
-RUN_ICONS: dict[str, str] = {"scene": "\U0001f3ac", "script": "\U0001f4dc", "automation": "\u2699\ufe0f"}
+RUN_ICONS: dict[str, str] = {"script": "\U0001f4dc", "automation": "\u2699\ufe0f"}
 RUN_ICON_DEFAULT = "\u25b6\ufe0f"  # a domain added to RUN_SERVICES without an icon still gets a button
 
-# How often the list of scenes, scripts and automations is re-read, in seconds.
+# How often the list of scripts and automations is re-read, in seconds.
 # Unlike lights, this list is a *catalogue*: it only changes when the user edits
 # their Home Assistant configuration, so it is read once at startup and then
 # refreshed on a slow cycle instead of on every /esegui.
 RUNNABLES_REFRESH_SECONDS = 300.0
 
 MAX_BUTTONS = 24
+
+# Most messages one /esegui listing may occupy. Telegram rate-limits a chat at
+# roughly one message per second and reacts badly to a burst, so a pathological
+# installation is cut off here rather than being blasted at the user. With
+# MAX_BUTTONS entities per page this is a few hundred entities: far past what
+# anyone browses by scrolling, and /esegui <nome> is the answer beyond it.
+MAX_RUN_PAGES = 20
 MAX_VOICE_BYTES = 5 * 1024 * 1024  # ~5 minutes of ogg/opus: past that it is almost certainly not a command
 MAX_MESSAGE_CHARS = 4000  # Telegram stops at 4096: leave room for the truncation notice
 MAX_TOKENS = 2000  # keyboards stay usable without letting the map grow forever
@@ -374,7 +384,7 @@ class HassBot:
 
     # ------------------------------------------------- the runnable catalogue
     async def refresh_runnables(self) -> list[dict[str, Any]]:
-        """Re-read the scenes, scripts and automations and replace the cache.
+        """Re-read the scripts and automations and replace the cache.
 
         Called once from ``post_init`` and then by :meth:`_refresh_loop`.
 
@@ -399,7 +409,7 @@ class HassBot:
 
         ``/esegui`` goes through here rather than through :meth:`snapshot`, so the
         menu is built from the cached catalogue instead of a live read: the list of
-        scenes and automations changes when the user edits their Home Assistant
+        scripts and automations changes when the user edits their Home Assistant
         configuration, not from one minute to the next.
 
         Returns:
@@ -457,7 +467,7 @@ class HassBot:
 
         A failed read is logged and the cycle continues with the previous catalogue
         still in place: Home Assistant restarting must not leave the bot unable to
-        list its scenes, and there is nothing a user could do about it anyway. Any
+        list its scripts, and there is nothing a user could do about it anyway. Any
         other exception is logged with its traceback for the same reason -- a
         background task that dies silently is the worst possible outcome, because
         the catalogue would then quietly freeze for the lifetime of the process.
@@ -571,7 +581,7 @@ class HassBot:
         states: list[dict[str, Any]],
         domains: tuple[str, ...] = RUN_DOMAINS,
     ) -> list[dict[str, Any]]:
-        """Select the executable entities -- scenes, scripts and automations.
+        """Select the executable entities -- scripts and automations.
 
         The counterpart of :meth:`_lights` for the ``/esegui`` side of the bot, and
         the one place the "what can be run" question is answered, so the listing,
@@ -580,11 +590,11 @@ class HassBot:
         Args:
             states: A full snapshot from :meth:`snapshot`.
             domains: Which domains count. Defaults to every key of
-                :data:`RUN_SERVICES`; a caller can narrow it to, say, ``("scene",)``.
+                :data:`RUN_SERVICES`; a caller can narrow it to, say, ``("script",)``.
 
         Returns:
             The matching entities sorted by domain and then by friendly name, so a
-            listing groups the scenes together and the order does not follow the
+            listing groups the scripts together and the order does not follow the
             arbitrary order of a Home Assistant snapshot.
         """
         prefixes = tuple(f"{d}." for d in domains)
@@ -927,7 +937,7 @@ class HassBot:
         await self.reply(update, "\n".join(lines), lang)
 
     async def cmd_run(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle ``/esegui [nome]`` and ``/run [name]``: run a scene, script or automation.
+        """Handle ``/esegui [nome]`` and ``/run [name]``: run a script or an automation.
 
         The only *executing* command of the bot, as opposed to the switching ones:
         it starts something that then runs on its own. With no argument it lists
@@ -942,10 +952,12 @@ class HassBot:
         """Resolve what the user wants to run, and run it.
 
         Targets are resolved with the same ladder as :meth:`_switch`, minus the room
-        and whole-house rules -- a scene has no area, and "run the whole house" means
-        nothing:
+        and whole-house rules -- a script has no area, and "run the whole house"
+        means nothing:
 
-        1. **No query** -- list everything runnable, with a button per entity.
+        1. **No query** -- list everything runnable, with a button per entity. A
+           catalogue that does not fit one Telegram message is sent as several,
+           split by :meth:`_runnables_pages`.
         2. **A single entity**, when the search returns one result or the top
            result's name matches the query exactly.
         3. **Several candidates** -- a keyboard, one button each. Nothing runs until
@@ -960,7 +972,7 @@ class HassBot:
 
         Args:
             update: The update to reply to.
-            query: What to run: a scene, script or automation name. Empty lists.
+            query: What to run: a script or automation name. Empty lists.
             lang: Language to answer in.
 
         Note:
@@ -975,12 +987,11 @@ class HassBot:
             return
 
         if not query:
-            await self.reply(
-                update,
-                self._runnables_text(runnables, lang),
-                lang,
-                reply_markup=self._run_keyboard(runnables, lang),
-            )
+            # One message per page, each carrying the buttons for the entities it
+            # names: a catalogue too big for one Telegram message is split, never
+            # truncated.
+            for text, page in self._runnables_pages(runnables, lang):
+                await self.reply(update, text, lang, reply_markup=self._run_keyboard(page, lang))
             return
 
         found = ent.search(query, runnables, areas, domains=RUN_DOMAINS, limit=MAX_BUTTONS)
@@ -1001,7 +1012,7 @@ class HassBot:
         """Return the areas mapping, or an empty one when it cannot be read.
 
         Only ``/esegui`` uses this. Everywhere else a missing areas mapping would
-        gut the answer -- ``/luci`` is a per-room summary -- but scenes, scripts and
+        gut the answer -- ``/luci`` is a per-room summary -- but scripts and
         automations are almost never assigned to a room, so for them the mapping
         only contributes a third haystack to :func:`entities.search`. Losing it
         degrades the fuzzy matching slightly; refusing to answer would lose the
@@ -1042,35 +1053,111 @@ class HassBot:
         await self.reply(update, t(lang, "result_run", icon=icon, what=esc(ent.friendly_name(target))), lang)
 
     @staticmethod
-    def _runnables_text(runnables: list[dict[str, Any]], lang: str = i18n.DEFAULT_LANG) -> str:
-        """Render the listing of everything that can be run.
+    def _runnable_entry(state: dict[str, Any], lang: str = i18n.DEFAULT_LANG) -> str:
+        """Render one entity as its two lines of the listing.
+
+        Args:
+            state: The entity.
+            lang: Language for the "disabled" marker.
+
+        Returns:
+            The name -- marked when it is a disabled automation, since a disabled
+            automation can still be triggered by hand and the user should know that
+            is what they are doing -- above its entity id in a code span. Both
+            values come from Home Assistant, so both are escaped.
+        """
+        entity_id = state["entity_id"]
+        off = entity_id.startswith("automation.") and not ent.is_on(state)
+        suffix = f" <i>({t(lang, 'automation_disabled')})</i>" if off else ""
+        return f"\u2022 {esc(ent.friendly_name(state))}{suffix}\n  <code>{esc(entity_id)}</code>"
+
+    @staticmethod
+    def _runnables_pages(
+        runnables: list[dict[str, Any]],
+        lang: str = i18n.DEFAULT_LANG,
+        limit: int = MAX_MESSAGE_CHARS,
+        per_page: int = MAX_BUTTONS,
+    ) -> list[tuple[str, list[dict[str, Any]]]]:
+        """Render the listing of everything that can be run, split into messages.
 
         Grouped by domain rather than by room, which is the only grouping that means
-        anything here: scenes, scripts and automations are three different kinds of
-        thing, and almost none of them are assigned to an area.
+        anything here: a script and an automation are different kinds of thing,
+        and almost none of them are assigned to an area.
+
+        A house with a few dozen automations produces a listing past Telegram's
+        4096-character cap, and past what a single inline keyboard can usefully
+        hold. Rather than truncating it -- which is what :func:`clip` would do,
+        silently hiding half the catalogue -- the listing is split into pages, each
+        sent as its own message with its own keyboard.
+
+        A page is closed on whichever limit is reached first:
+
+        * ``limit`` characters, so Telegram accepts the message;
+        * ``per_page`` entities, so the keyboard stays usable and, more importantly,
+          so **every entity named in a page has a button in that page**. Text and
+          keyboard are built from the same list, which is what keeps them in step
+          however the catalogue is split.
+
+        A domain interrupted by a page break repeats its heading on the next page,
+        marked as a continuation, so no page opens with an unlabelled list.
 
         Args:
             runnables: The entities to list, already sorted by :meth:`_runnables`.
             lang: Language for the headings.
+            limit: Character budget per page.
+            per_page: Maximum entities per page.
 
         Returns:
-            The message body, HTML-escaped. Disabled automations are marked, since a
-            disabled automation can still be triggered by hand and the user should
-            know that is what they are doing.
+            ``[(text, entities)]``, one pair per message to send, in order. The
+            entities are exactly those named in that page's text. Never empty: a
+            caller with an empty catalogue is expected to have said so already.
+
+            At most :data:`MAX_RUN_PAGES` pages. Beyond that the listing does stop,
+            but it says so and says how many entities it did not name -- the one
+            thing :func:`clip` would not have done.
         """
-        lines = [t(lang, "runnables_title"), ""]
+        pages: list[tuple[str, list[dict[str, Any]]]] = []
+        lines: list[str] = [t(lang, "runnables_title"), ""]
+        shown: list[dict[str, Any]] = []
+        size = sum(len(line) + 1 for line in lines)
+
+        def flush() -> None:
+            """Close the current page; the next one starts empty."""
+            nonlocal lines, shown, size
+            if shown:
+                pages.append(("\n".join(lines), shown))
+            lines, shown, size = [], [], 0
+
+        def add(line: str) -> None:
+            """Append a line, keeping the running page length in step with it."""
+            nonlocal size
+            lines.append(line)
+            size += len(line) + 1  # the newline that will join it to the line above
+
         for domain in RUN_DOMAINS:
             group = [s for s in runnables if s["entity_id"].startswith(f"{domain}.")]
             if not group:
                 continue
-            lines.append(f"{RUN_ICONS[domain]} <b>{t(lang, f'domain_{domain}')}</b>")
-            for s in group:
-                off = domain == "automation" and not ent.is_on(s)
-                suffix = f" <i>({t(lang, 'automation_disabled')})</i>" if off else ""
-                lines.append(f"• {esc(ent.friendly_name(s))}{suffix}\n  <code>{esc(s['entity_id'])}</code>")
-            lines.append("")
-        lines.append(t(lang, "run_tap_hint"))
-        return "\n".join(lines)
+            add(f"{RUN_ICONS[domain]} <b>{t(lang, f'domain_{domain}')}</b>")
+            for state in group:
+                entry = HassBot._runnable_entry(state, lang)
+                if shown and (size + len(entry) > limit or len(shown) >= per_page):
+                    flush()
+                    add(t(lang, "domain_continued", icon=RUN_ICONS[domain],
+                          domain=t(lang, f"domain_{domain}")))
+                add(entry)
+                shown.append(state)
+            add("")
+
+        add(t(lang, "run_tap_hint"))
+        flush()
+
+        if len(pages) > MAX_RUN_PAGES:
+            listed = sum(len(page) for _, page in pages[:MAX_RUN_PAGES])
+            pages = pages[:MAX_RUN_PAGES]
+            text, page = pages[-1]
+            pages[-1] = (text + "\n" + t(lang, "run_list_capped", count=len(runnables) - listed), page)
+        return pages
 
     @staticmethod
     def _run_keyboard(runnables: list[dict[str, Any]], lang: str = i18n.DEFAULT_LANG) -> InlineKeyboardMarkup:
@@ -1078,7 +1165,7 @@ class HassBot:
 
         Unlike :meth:`_lights_keyboard` there is no bulk button and no refresh
         button: running everything at once is never the intent, and there is no
-        state to refresh -- a scene has no "on" to display.
+        state to refresh -- a script is not something that is "on".
 
         Args:
             runnables: The entities to offer, capped at :data:`MAX_BUTTONS`.
@@ -1232,12 +1319,11 @@ class HassBot:
             await self.ha.call_service(domain, service, {"entity_id": group})
 
     async def _run_ids(self, ids: list[str]) -> None:
-        """Execute a set of scenes, scripts or automations.
+        """Execute a set of scripts or automations.
 
         Like :meth:`_call_on_ids` this buckets by domain and issues one call per
-        bucket, but the service is not the same for every bucket: a scene and a
-        script are *started* with ``turn_on``, whereas an automation needs
-        ``trigger``. ``automation.turn_on`` would merely enable it -- the automation
+        bucket, but the service is not the same for every bucket: a script is
+        *started* with ``turn_on``, whereas an automation needs ``trigger``. ``automation.turn_on`` would merely enable it -- the automation
         would then fire at its own trigger, minutes or days later, which reads as
         "nothing happened" to whoever asked.
 
@@ -1631,7 +1717,7 @@ class HassBot:
         ``do:<on|off>:<t>``   Switch one entity, then re-render the message.
         ``all:<on|off>:<t>``  Switch every entity in the token, then re-render.
         ``refresh:<t>``       Re-read the states and re-render the message.
-        ``run:<t>``           Run one scene, script or automation. The message is
+        ``run:<t>``           Run one script or automation. The message is
                               left untouched: the keyboard is a menu, not a status
                               display, so re-rendering it would only take the other
                               options away.
@@ -1783,7 +1869,7 @@ class HassBot:
 
         The six intents are ``temperature``, ``on``, ``off``, ``lights_on``
         (list what is currently on), ``lights`` (browse) and ``run`` (execute a
-        scene, script or automation). A sentence matching
+        script or an automation). A sentence matching
         none of them is quoted back so the user can see how it was understood --
         especially useful after a transcription -- along with a pointer to the
         commands.
@@ -2052,8 +2138,8 @@ def main() -> None:
                                             default ``it-IT``.
     ``STT_LANGUAGE_EN``                     Transcription tag for English,
                                             default ``en-US``.
-    ``RUNNABLES_REFRESH_SECONDS``           How often the scene, script and
-                                            automation catalogue is re-read.
+    ``RUNNABLES_REFRESH_SECONDS``           How often the script and automation
+                                            catalogue is re-read.
                                             Default 300; ``0`` disables the
                                             cycle and reads it once at startup.
     ======================================= ====================================

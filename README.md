@@ -21,7 +21,7 @@ Le credenziali sono lette da `.env` (già presente):
 | `BOT_LANGUAGE` | *(opzionale)* lingua iniziale di una chat nuova, `it` o `en`. Default `it` |
 | `STT_LANGUAGE_IT` | *(opzionale)* lingua dei vocali italiani, default `it-IT`. `STT_LANGUAGE` resta accettato come sinonimo |
 | `STT_LANGUAGE_EN` | *(opzionale)* lingua dei vocali inglesi, default `en-US` |
-| `RUNNABLES_REFRESH_SECONDS` | *(opzionale)* ogni quanto rileggere scene, script e automazioni. Default `300`; `0` disattiva il ciclo e legge solo all'avvio |
+| `RUNNABLES_REFRESH_SECONDS` | *(opzionale)* ogni quanto rileggere script e automazioni. Default `300`; `0` disattiva il ciclo e legge solo all'avvio |
 
 ## Avvio
 
@@ -51,8 +51,8 @@ niente Home Assistant. Dettagli in [docs/development.md](docs/development.md#tes
 | `/temperatura` | temperature e umidità di tutte le stanze (come `/temperatura casa`) |
 | `/temperatura bagno` | solo quella stanza |
 | `/stato <nome>` | stato di una qualsiasi entità (anche sensori, prese, climate) |
-| `/esegui` | elenca scene, script e automazioni, con un bottone per ciascuno |
-| `/esegui cinema` | esegue quella scena, quello script o quell'automazione |
+| `/esegui` | elenca script e automazioni, con un bottone per ciascuno |
+| `/esegui buonanotte` | esegue quello script o quell'automazione |
 | `/lingua it\|en` | fissa la lingua della chat (`/language` è lo stesso comando) |
 
 Ogni comando ha un alias inglese: `/lights`, `/whatson`, `/on`, `/off`,
@@ -67,27 +67,34 @@ così il conteggio nella risposta è quello reale.
 
 Funziona anche in linguaggio naturale: *«accendi la luce dello studio»*, *«spegni le luci del salone»*,
 *«che temperatura c'è in camera da letto?»*, *«quanti gradi in salone»*, *«accendi tutto»*, *«spegni tutte le luci»*,
-*«esegui la scena cinema»*, *«lancia lo script buonanotte»*.
+*«esegui lo script buonanotte»*, *«lancia l'automazione risveglio»*.
 
-### Scene, script e automazioni
+### Script e automazioni
 
 `/esegui` è l'unico comando che **avvia** qualcosa invece di accenderlo, e sceglie il servizio giusto per
-ogni dominio: `scene.turn_on` per una scena, `script.turn_on` per uno script e `automation.trigger` per
-un'automazione — non `automation.turn_on`, che si limiterebbe ad *abilitarla* senza eseguirla.
+ogni dominio: `script.turn_on` per uno script e `automation.trigger` per un'automazione — non
+`automation.turn_on`, che si limiterebbe ad *abilitarla* senza eseguirla.
+Le **scene non sono incluse**: una scena è un insieme di stati da applicare, più vicina ai comandi di
+accensione che a quelli di esecuzione.
 Un'automazione disattivata resta eseguibile a mano ed è segnalata come tale nell'elenco.
 L'elenco viene **letto all'avvio e poi rinfrescato a ciclo** (`RUNNABLES_REFRESH_SECONDS`, default 300 s):
 `/esegui` risponde dalla memoria, quindi il menu resta disponibile anche se Home Assistant è
 momentaneamente irraggiungibile — è l'esecuzione vera e propria a fallire, non l'elenco.
 Il rovescio della medaglia: se abiliti o disabiliti un'automazione da Home Assistant, l'indicazione
 nell'elenco si aggiorna al giro successivo.
-Scene, script e automazioni non fanno mai parte di `/accendi`, `/spegni` o `/luci`: «spegni casa» non può
-raggiungerle.
+
+Se le automazioni sono tante l'elenco **non viene troncato**: è diviso in più messaggi, ognuno con i
+bottoni delle sole entità che nomina, e il titolo del dominio viene ripetuto come *(segue)*.
+Oltre le 20 pagine (`MAX_RUN_PAGES`, circa 480 entità) il bot si ferma — per non farsi limitare da
+Telegram — dicendo quante ne mancano e rimandando a `/esegui nome`.
+Script e automazioni non fanno mai parte di `/accendi`, `/spegni` o `/luci`: «spegni casa» non può
+raggiungerli.
 
 ## Bilingue 🇮🇹 🇬🇧
 
 Scrivi in inglese e il bot passa all'inglese, senza configurare niente:
 *«turn on the light in the study»*, *«turn everything off»*, *«how warm is it in
-the bedroom?»*, *«which lights are on»*, *«run the cinema scene»*. La lingua riconosciuta diventa quella
+the bedroom?»*, *«which lights are on»*, *«run the good night script»*. La lingua riconosciuta diventa quella
 della chat, quindi valgono anche per i bottoni e per i vocali; `/lingua it` o
 `/language en` la fissano a mano.
 

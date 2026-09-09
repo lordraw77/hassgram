@@ -287,23 +287,23 @@ class TestParse(unittest.TestCase):
         self.assertEqual(i18n.parse("accendi lo studio", "de"), ("on", "studio"))
 
     def test_italian_run_verbs_are_not_read_as_a_switch(self):
-        for sentence in ("esegui la scena cinema", "lancia lo script buonanotte",
+        for sentence in ("esegui lo script buonanotte", "lancia lo script aperitivo",
                          "avvia l'automazione risveglio"):
             with self.subTest(sentence=sentence):
                 self.assertEqual(i18n.parse(sentence, "it")[0], "run")
 
     def test_english_run_verbs_are_not_read_as_a_switch(self):
-        for sentence in ("run the cinema scene", "trigger the wake up automation",
-                         "execute the good night script"):
+        for sentence in ("run the good night script", "trigger the wake up automation",
+                         "execute the aperitivo script"):
             with self.subTest(sentence=sentence):
                 self.assertEqual(i18n.parse(sentence, "en")[0], "run")
 
     def test_run_leaves_the_name_as_the_target(self):
-        self.assertEqual(i18n.parse("esegui cinema", "it"), ("run", "cinema"))
-        self.assertEqual(i18n.parse("run cinema", "en"), ("run", "cinema"))
+        self.assertEqual(i18n.parse("esegui buonanotte", "it"), ("run", "buonanotte"))
+        self.assertEqual(i18n.parse("run buonanotte", "en"), ("run", "buonanotte"))
 
     def test_attiva_still_switches_rather_than_runs(self):
-        """It is said of a light far more often than of a scene; /esegui covers the rest."""
+        """It is said of a light far more often than of a script; /esegui covers the rest."""
         self.assertEqual(i18n.parse("attiva la luce dello studio", "it"), ("on", "studio"))
 
     def test_the_run_rule_does_not_swallow_the_switching_sentences(self):
