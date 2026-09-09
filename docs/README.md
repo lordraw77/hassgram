@@ -25,9 +25,12 @@ answers in the same language, voice messages included. See
 
 ## At a glance
 
-- **Four modules.** [`bot.py`](../bot.py) owns everything Telegram-shaped,
-  [`ha_client.py`](../ha_client.py) owns all HTTP traffic,
-  [`entities.py`](../entities.py) is a pure domain layer with no I/O, and
+- **One concern per module.** [`bot.py`](../bot.py) owns the bot's state and its
+  command handlers; [`views.py`](../views.py) renders every string and keyboard;
+  [`callbacks.py`](../callbacks.py) routes button taps and
+  [`voice.py`](../voice.py) handles voice notes;
+  [`ha_client.py`](../ha_client.py) owns all HTTP traffic;
+  [`entities.py`](../entities.py) is a pure domain layer with no I/O; and
   [`i18n.py`](../i18n.py) holds every user-facing string plus the two grammars.
 - **Three dependencies**: `python-telegram-bot`, `httpx`, `python-dotenv`.
 - **No database, no message queue, no external AI service.** The natural

@@ -71,8 +71,12 @@ class TestCatalogueStructure(unittest.TestCase):
     def test_every_key_the_code_asks_for_exists(self):
         """Scan the source for ``t(lang, "key")`` and ``plural("base", n)``."""
         wanted: set[str] = set()
-        for name in ("bot.py", "entities.py", "i18n.py"):
-            tree = ast.parse((ROOT / name).read_text())
+        # Every module at the project root, rather than a hand-kept list: splitting
+        # a module must never silently drop half the catalogue out of this check.
+        sources = sorted(ROOT.glob("*.py"))
+        self.assertGreaterEqual(len(sources), 4, "the source scan found almost no modules")
+        for path in sources:
+            tree = ast.parse(path.read_text())
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Call):
                     continue

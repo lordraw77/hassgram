@@ -21,7 +21,7 @@ Telegram voice note (ogg/opus, 48 kHz)
    Home Assistant STT provider  →  {"result": "success", "text": "accendi lo studio"}
         │
         ▼
-   echoed to the user, then fed to _dispatch_text() — the same parser typed text uses
+   echoed to the user, then fed to HassBot._dispatch_text() — the parser typed text uses
 ```
 
 The transcription is echoed back *before* it is executed. Speech recognition is
@@ -130,6 +130,6 @@ The parser did not recognise the phrasing. The echoed text tells you exactly
 what to work with — see [development.md](development.md#teaching-it-a-new-phrasing).
 
 **"🎙 Vocale troppo lungo"**
-Over 5 MB. Raise `MAX_VOICE_BYTES` in [`bot.py`](../bot.py) if you really need
+Over 5 MB. Raise `MAX_VOICE_BYTES` in [`constants.py`](../constants.py) if you really need
 longer clips, keeping in mind that the whole clip is buffered in memory and
 billed by the provider.

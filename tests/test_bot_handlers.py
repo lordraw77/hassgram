@@ -22,7 +22,11 @@ from tests.fakes import (
 )
 
 import bot
+import callbacks
 import i18n
+import views
+import voice
+import constants
 from ha_client import HomeAssistantError
 
 
@@ -35,7 +39,7 @@ class BotTestCase(unittest.IsolatedAsyncioTestCase):
     """Resets the process-global token store, which tests would otherwise share."""
 
     def setUp(self):
-        bot._tokens.clear()
+        views._tokens.clear()
         self.b = make_bot()
 
 
@@ -91,9 +95,9 @@ class AuthorisationTest(BotTestCase):
     async def test_callbacks_refuse_a_stranger_with_an_alert(self):
         b = make_bot(allowed={42})
         update = FakeUpdate(chat_id=7)
-        query = FakeQuery(data=f"do:on:{bot.tok('light.cucina')}")
+        query = FakeQuery(data=f"do:on:{views.tok('light.cucina')}")
         update.callback_query = query
-        await b.on_callback(update, context())
+        await callbacks.on_callback(b, update, context())
         self.assertEqual(b.ha.calls, [])
         self.assertTrue(query.answers[0][1]["show_alert"])
 
@@ -470,45 +474,45 @@ class TemperatureTest(BotTestCase):
 class CallbackTest(BotTestCase):
     async def handle(self, data, lang="it"):
         query = FakeQuery(data)
-        await self.b._handle_callback(query, data, lang)
+        await callbacks.handle(self.b, query, data, lang)
         return query
 
     async def test_area_shows_the_rooms_lights(self):
-        query = await self.handle(f"area:{bot.tok('Cucina')}")
+        query = await self.handle(f"area:{views.tok('Cucina')}")
         self.assertIn("Luce cucina", query.last_edit)
         self.assertIn("Led cucina", query.last_edit)
 
     async def test_temp_shows_the_rooms_sensors(self):
-        query = await self.handle(f"temp:{bot.tok('Salone')}")
+        query = await self.handle(f"temp:{views.tok('Salone')}")
         self.assertIn("21.5", query.last_edit)
 
     async def test_temp_excludes_a_decoy_device_class(self):
-        query = await self.handle(f"temp:{bot.tok('Salone')}")
+        query = await self.handle(f"temp:{views.tok('Salone')}")
         self.assertNotIn("Allarme gelo", query.last_edit)
 
     async def test_temp_for_a_room_without_sensors_says_so(self):
         """Regression: the fallback used to be unreachable, leaving a bare heading."""
-        query = await self.handle(f"temp:{bot.tok('Bagno')}")
+        query = await self.handle(f"temp:{views.tok('Bagno')}")
         self.assertEqual(query.last_edit, i18n.t("it", "no_sensors"))
 
     async def test_temp_for_a_room_without_sensors_is_localised(self):
-        query = await self.handle(f"temp:{bot.tok('Bagno')}", lang="en")
+        query = await self.handle(f"temp:{views.tok('Bagno')}", lang="en")
         self.assertEqual(query.last_edit, i18n.t("en", "no_sensors"))
 
     async def test_do_switches_one_entity_and_re_renders(self):
-        query = await self.handle(f"do:on:{bot.tok('light.cucina')}")
+        query = await self.handle(f"do:on:{views.tok('light.cucina')}")
         self.assertEqual(self.b.ha.calls, [("light", "turn_on", ["light.cucina"])])
         self.assertEqual(query.answers[0][0], i18n.t("it", "toast_on"))
         self.assertTrue(query.edits)
 
     async def test_all_switches_every_entity_in_the_token(self):
-        token = bot.tok("light.cucina|light.studio")
+        token = views.tok("light.cucina|light.studio")
         query = await self.handle(f"all:off:{token}")
         self.assertEqual(self.b.ha.calls, [("light", "turn_off", ["light.cucina", "light.studio"])])
         self.assertIn("(2)", query.answers[0][0])
 
     async def test_refresh_re_reads_the_states(self):
-        query = await self.handle(f"refresh:{bot.tok('light.cucina')}")
+        query = await self.handle(f"refresh:{views.tok('light.cucina')}")
         self.assertEqual(query.answers[0][0], i18n.t("it", "toast_refreshed"))
         self.assertEqual(self.b.ha.invalidations, 1)
 
@@ -527,8 +531,8 @@ class CallbackTest(BotTestCase):
     async def test_a_home_assistant_failure_becomes_an_alert(self):
         b = make_bot(ha=FakeHA(fail_with=HomeAssistantError("down", kind="network")))
         update = FakeUpdate()
-        update.callback_query = FakeQuery(f"do:on:{bot.tok('light.cucina')}")
-        await b.on_callback(update, context())
+        update.callback_query = FakeQuery(f"do:on:{views.tok('light.cucina')}")
+        await callbacks.on_callback(b, update, context())
         text = update.callback_query.answers[-1][0]
         self.assertIn("Rete non raggiungibile", text)
         self.assertLessEqual(len(text), 190)
@@ -538,32 +542,32 @@ class RefreshMessageTest(BotTestCase):
     async def test_an_identical_rendering_is_not_an_error(self):
         query = FakeQuery()
         query.edit_error = BadRequest("Message is not modified")
-        await self.b._refresh_message(query, ["light.cucina"], "it")  # must not raise
+        await callbacks.refresh_message(self.b, query, ["light.cucina"], "it")  # must not raise
 
     async def test_any_other_edit_failure_propagates(self):
         query = FakeQuery()
         query.edit_error = BadRequest("Chat not found")
         with self.assertRaises(BadRequest):
-            await self.b._refresh_message(query, ["light.cucina"], "it")
+            await callbacks.refresh_message(self.b, query, ["light.cucina"], "it")
 
     async def test_entities_that_vanished_are_dropped(self):
         query = FakeQuery()
-        await self.b._refresh_message(query, ["light.cucina", "light.gone"], "it")
+        await callbacks.refresh_message(self.b, query, ["light.cucina", "light.gone"], "it")
         self.assertIn("Luce cucina", query.last_edit)
 
     async def test_a_message_with_nothing_left_to_show_is_left_alone(self):
         query = FakeQuery()
-        await self.b._refresh_message(query, ["light.gone"], "it")
+        await callbacks.refresh_message(self.b, query, ["light.gone"], "it")
         self.assertEqual(query.edits, [])
 
     async def test_several_entities_are_titled_with_their_room(self):
         query = FakeQuery()
-        await self.b._refresh_message(query, ["light.cucina", "light.cucina_led"], "it")
+        await callbacks.refresh_message(self.b, query, ["light.cucina", "light.cucina_led"], "it")
         self.assertIn("<b>Cucina</b>", query.last_edit)
 
     async def test_one_entity_is_titled_with_its_name(self):
         query = FakeQuery()
-        await self.b._refresh_message(query, ["light.cucina"], "it")
+        await callbacks.refresh_message(self.b, query, ["light.cucina"], "it")
         self.assertIn("<b>Luce cucina</b>", query.last_edit)
 
 
@@ -622,7 +626,7 @@ class VoiceTest(BotTestCase):
         b = make_bot(stt_entity="stt.whisper")
         b.ha.stt_result = "accendi la luce dello studio"
         update = self.voice_update()
-        await b.on_voice(update, context())
+        await voice.on_voice(b, update, context())
         texts = [t for t, _ in update.effective_message.sent]
         self.assertIn("accendi la luce dello studio", texts[0])   # echoed first
         self.assertEqual(b.ha.calls, [("light", "turn_on", ["light.studio"])])
@@ -630,51 +634,51 @@ class VoiceTest(BotTestCase):
     async def test_shows_a_typing_action_while_it_works(self):
         b = make_bot(stt_entity="stt.whisper")
         update = self.voice_update()
-        await b.on_voice(update, context())
+        await voice.on_voice(b, update, context())
         self.assertEqual(len(update.effective_message.chat.actions), 1)
 
     async def test_uses_the_chats_language_for_the_engine(self):
         b = make_bot(stt_entity="stt.whisper")
         b.chat_lang[1] = "en"
         b.ha.stt_result = "turn on the light in the study"
-        await b.on_voice(self.voice_update(), context())
+        await voice.on_voice(b, self.voice_update(), context())
         self.assertEqual(b.ha.stt_calls[0]["language"], "en-US")
 
     async def test_italian_chats_get_the_italian_tag(self):
         b = make_bot(stt_entity="stt.whisper")
-        await b.on_voice(self.voice_update(), context())
+        await voice.on_voice(b, self.voice_update(), context())
         self.assertEqual(b.ha.stt_calls[0]["language"], "it-IT")
 
     async def test_declares_the_container_telegram_actually_sent(self):
         b = make_bot(stt_entity="stt.whisper")
-        await b.on_voice(self.voice_update(mime_type="audio/ogg"), context())
+        await voice.on_voice(b, self.voice_update(mime_type="audio/ogg"), context())
         self.assertEqual(b.ha.stt_calls[0]["audio_format"], "ogg")
         self.assertEqual(b.ha.stt_calls[0]["codec"], "opus")
 
     async def test_without_an_engine_it_explains_instead_of_failing(self):
         b = make_bot(stt_entity=None)
         update = self.voice_update()
-        await b.on_voice(update, context())
+        await voice.on_voice(b, update, context())
         self.assertIn("speech-to-text", update.effective_message.last)
         self.assertEqual(b.ha.stt_calls, [])
 
     async def test_an_oversized_clip_is_refused_before_it_is_downloaded(self):
         b = make_bot(stt_entity="stt.whisper")
-        update = self.voice_update(size=bot.MAX_VOICE_BYTES + 1)
-        await b.on_voice(update, context())
+        update = self.voice_update(size=constants.MAX_VOICE_BYTES + 1)
+        await voice.on_voice(b, update, context())
         self.assertIn("troppo lungo", update.effective_message.last)
         self.assertEqual(b.ha.stt_calls, [])
 
     async def test_a_clip_at_the_limit_is_accepted(self):
         b = make_bot(stt_entity="stt.whisper")
-        await b.on_voice(self.voice_update(size=bot.MAX_VOICE_BYTES), context())
+        await voice.on_voice(b, self.voice_update(size=constants.MAX_VOICE_BYTES), context())
         self.assertEqual(len(b.ha.stt_calls), 1)
 
     async def test_silence_is_reported_not_executed(self):
         b = make_bot(stt_entity="stt.whisper")
         b.ha.stt_result = ""
         update = self.voice_update()
-        await b.on_voice(update, context())
+        await voice.on_voice(b, update, context())
         self.assertIn("Non ho sentito nulla", update.effective_message.last)
         self.assertEqual(b.ha.calls, [])
 
@@ -683,14 +687,14 @@ class VoiceTest(BotTestCase):
         b.chat_lang[1] = "en"
         update = self.voice_update()
         with self.assertLogs("hassgram", level="WARNING"):
-            await b.on_voice(update, context())
+            await voice.on_voice(b, update, context())
         self.assertIn("could not transcribe", update.effective_message.last)
         self.assertIn("rejected the audio", update.effective_message.last)
 
     async def test_an_update_with_no_media_is_ignored(self):
         b = make_bot(stt_entity="stt.whisper")
         update = FakeUpdate()
-        await b.on_voice(update, context())
+        await voice.on_voice(b, update, context())
         self.assertEqual(update.effective_message.sent, [])
 
 
@@ -946,13 +950,13 @@ class RunCommandTest(BotTestCase):
         await self.b.cmd_run(update, context([]))
         data = next(d for d in payloads(update.effective_message.markup) if d.startswith("run:"))
         query = FakeQuery(data)
-        await self.b._handle_callback(query, data, "it")
+        await callbacks.handle(self.b, query, data, "it")
         self.assertEqual(len(self.b.ha.calls), 1)
         self.assertEqual(query.edits, [])  # a menu, not a status display: left untouched
 
     async def test_an_expired_run_token_runs_nothing(self):
         query = FakeQuery("run:deadbeef")
-        await self.b._handle_callback(query, query.data, "it")
+        await callbacks.handle(self.b, query, query.data, "it")
         self.assertEqual(self.b.ha.calls, [])
         self.assertEqual(query.answers[0][0], i18n.t("it", "session_expired"))
 
@@ -1044,18 +1048,18 @@ class RunnablesPagingTest(BotTestCase):
         The catalogue is sized off the constants rather than off a round number, so
         the test keeps testing the cap when either of them is retuned.
         """
-        total = bot.MAX_RUN_PAGES * bot.MAX_BUTTONS + 7
+        total = constants.MAX_RUN_PAGES * constants.MAX_BUTTONS + 7
         sent = await self.send(catalogue(automations=total))
-        self.assertEqual(len(sent), bot.MAX_RUN_PAGES)
+        self.assertEqual(len(sent), constants.MAX_RUN_PAGES)
         listed = sum(len(payloads(kw["reply_markup"])) for _, kw in sent)
         self.assertLess(listed, total)
         self.assertIn(str(total - listed), sent[-1][0])
 
     async def test_a_catalogue_that_fits_the_cap_is_never_capped(self):
         """One page short of the cap must still be listed in full."""
-        total = (bot.MAX_RUN_PAGES - 1) * bot.MAX_BUTTONS
+        total = (constants.MAX_RUN_PAGES - 1) * constants.MAX_BUTTONS
         sent = await self.send(catalogue(automations=total))
-        self.assertLessEqual(len(sent), bot.MAX_RUN_PAGES)
+        self.assertLessEqual(len(sent), constants.MAX_RUN_PAGES)
         listed = sum(len(payloads(kw["reply_markup"])) for _, kw in sent)
         self.assertEqual(listed, total)
         capped = i18n.MESSAGES["run_list_capped"]["it"].split("{")[0]
@@ -1063,20 +1067,20 @@ class RunnablesPagingTest(BotTestCase):
             self.assertNotIn(capped, text)
 
     async def test_the_cap_holds_at_whatever_value_it_is_set_to(self):
-        with mock.patch.object(bot, "MAX_RUN_PAGES", 3):
-            sent = await self.send(catalogue(automations=3 * bot.MAX_BUTTONS + 5))
+        with mock.patch.object(views, "MAX_RUN_PAGES", 3):
+            sent = await self.send(catalogue(automations=3 * constants.MAX_BUTTONS + 5))
         self.assertEqual(len(sent), 3)
 
     def test_a_page_break_falls_on_the_character_budget(self):
         """Not only on the entity count: long names must close a page early."""
         states = catalogue(automations=40, name="{i:03d} " + "n" * 200)
-        pages = bot.HassBot._runnables_pages(states, "it")
-        self.assertTrue(any(len(page) < bot.MAX_BUTTONS for _, page in pages[:-1]))
+        pages = views.runnables_pages(states, "it")
+        self.assertTrue(any(len(page) < constants.MAX_BUTTONS for _, page in pages[:-1]))
         for text, _ in pages:
-            self.assertLessEqual(len(text), bot.MAX_MESSAGE_CHARS)
+            self.assertLessEqual(len(text), constants.MAX_MESSAGE_CHARS)
 
     def test_one_entity_per_page_still_produces_a_coherent_listing(self):
-        pages = bot.HassBot._runnables_pages(house(), "it", per_page=1)
+        pages = views.runnables_pages(house(), "it", per_page=1)
         self.assertEqual([len(page) for _, page in pages], [1, 1, 1, 1])
         self.assertIn(i18n.t("it", "run_tap_hint"), pages[-1][0])
 

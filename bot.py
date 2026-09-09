@@ -1,11 +1,21 @@
 """Telegram front end for Home Assistant.
 
 Hassgram lets a small, trusted set of Telegram chats drive a Home Assistant
-installation by typing commands, speaking them, or tapping inline buttons. This
-module owns everything Telegram-shaped: handler registration, message
-formatting, inline keyboards, callback routing and voice transcription. Domain
-logic lives in :mod:`entities`, the message catalogue and the two grammars in
-:mod:`i18n`, and all HTTP traffic in :mod:`ha_client`.
+installation by typing commands, speaking them, or tapping inline buttons.
+
+This module owns the bot's state and its command handlers: it holds the Home
+Assistant client, the allow-list, the per-chat language and the catalogue of
+runnables, and it wires everything together in :func:`main`. The rest of the
+Telegram front end is split off by concern -- rendering in :mod:`views`, inline
+buttons in :mod:`callbacks`, voice notes in :mod:`voice`, shared limits and
+domain constants in :mod:`constants`. Domain logic lives in :mod:`entities`, the
+message catalogue and the two grammars in :mod:`i18n`, and all HTTP traffic in
+:mod:`ha_client`.
+
+Those three handler modules take the bot as their first argument rather than
+being methods on it, which is what keeps the dependency one-way: they import
+:mod:`bot` for typing only, and :func:`main` binds them to the live instance
+with :func:`functools.partial`.
 
 Request flow
 ------------
@@ -14,9 +24,9 @@ Three entry points converge on the same execution path::
 
     /accendi studio  ---> CommandHandler ------+
     "accendi lo studio" -> on_text --+         |
-    voice note --> on_voice --(STT)--+--> _dispatch_text --> _switch --> _apply
-                                                                          |
-    button tap ---> on_callback -> _handle_callback ----------------------+
+    voice note -> voice.on_voice --+--> _dispatch_text --> _switch --> _apply
+                        (STT)                                             |
+    button tap -> callbacks.on_callback -> callbacks.handle --------------+
 
 Every switching path ends in :meth:`HassBot._call_on_ids`, which groups entity
 ids by domain and calls one Home Assistant service per domain. The executing
@@ -36,7 +46,7 @@ Authorisation
 
 Message size
     Telegram rejects messages longer than 4096 characters, and a large house
-    easily exceeds that. :func:`clip` truncates on a line boundary -- every
+    easily exceeds that. :func:`views.clip` truncates on a line boundary -- every
     line the bot emits is self-contained HTML, so cutting between lines leaves
     the markup balanced -- and every outbound message goes through
     :meth:`HassBot.reply`, which applies it.
@@ -44,7 +54,7 @@ Message size
 Callback payloads
     ``callback_data`` is capped at 64 bytes by Telegram, far too small for a
     list of entity ids. Buttons therefore carry a 12-character token, resolved
-    against the in-memory LRU behind :func:`tok` and :func:`untok`.
+    against the in-memory LRU behind :func:`views.tok` and :func:`views.untok`.
 
 Startup state
     Two things are read once at startup and then kept: the speech-to-text engine
@@ -65,26 +75,26 @@ Localisation
     The bot answers in Italian or English, following the chat (see
     :meth:`HassBot.resolve_lang`). No user-facing string is written in this
     module: every one of them comes from :func:`i18n.t`, including the failure
-    lines built by :func:`ha_error_text` out of a :class:`ha_client.HomeAssistantError`.
+    lines built by :func:`views.ha_error_text` out of a
+    :class:`ha_client.HomeAssistantError`.
     Code, comments and docstrings are English.
 """
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import html
 import logging
 import os
 import re
 import sys
 from collections import OrderedDict
+import functools
 from typing import Any
 
 from dotenv import load_dotenv
-from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ChatAction, ParseMode
-from telegram.error import BadRequest, TelegramError
+from telegram import BotCommand, Update
+from telegram.constants import ParseMode
+from telegram.error import TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -94,52 +104,28 @@ from telegram.ext import (
     filters,
 )
 
+import callbacks
 import entities as ent
 import i18n
+import views
+import voice
+from constants import (
+    LIGHT_DOMAINS,
+    MAX_BUTTONS,
+    MAX_CHAT_LANGS,
+    RUN_DOMAINS,
+    RUN_ICON_DEFAULT,
+    RUN_ICONS,
+    RUN_SERVICES,
+    RUNNABLES_REFRESH_SECONDS,
+)
 from i18n import t
 from ha_client import HomeAssistantClient, HomeAssistantError
+from views import clip, esc, ha_error_text
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s | %(message)s", level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("hassgram")
-
-LIGHT_DOMAINS = ("light", "switch")
-
-# Domains the bot can *execute*, as opposed to switch. They are kept out of
-# LIGHT_DOMAINS on purpose: a script is not a lamp, and "spegni casa" must never
-# reach one. The service each domain is run with differs -- calling
-# ``automation.turn_on`` would only *enable* the automation, not run it, which is
-# the single most confusing thing this feature could do.
-#
-# Scenes are deliberately absent: a scene is a set of states to apply, closer to
-# the switching commands than to the executing ones, and listing them here put
-# them in the same menu as the automations without behaving like them.
-RUN_SERVICES: dict[str, str] = {
-    "script": "turn_on",
-    "automation": "trigger",
-}
-RUN_DOMAINS: tuple[str, ...] = tuple(RUN_SERVICES)
-RUN_ICONS: dict[str, str] = {"script": "\U0001f4dc", "automation": "\u2699\ufe0f"}
-RUN_ICON_DEFAULT = "\u25b6\ufe0f"  # a domain added to RUN_SERVICES without an icon still gets a button
-
-# How often the list of scripts and automations is re-read, in seconds.
-# Unlike lights, this list is a *catalogue*: it only changes when the user edits
-# their Home Assistant configuration, so it is read once at startup and then
-# refreshed on a slow cycle instead of on every /esegui.
-RUNNABLES_REFRESH_SECONDS = 300.0
-
-MAX_BUTTONS = 24
-
-# Most messages one /esegui listing may occupy. Telegram rate-limits a chat at
-# roughly one message per second and reacts badly to a burst, so a pathological
-# installation is cut off here rather than being blasted at the user. With
-# MAX_BUTTONS entities per page this is a few hundred entities: far past what
-# anyone browses by scrolling, and /esegui <nome> is the answer beyond it.
-MAX_RUN_PAGES = 20
-MAX_VOICE_BYTES = 5 * 1024 * 1024  # ~5 minutes of ogg/opus: past that it is almost certainly not a command
-MAX_MESSAGE_CHARS = 4000  # Telegram stops at 4096: leave room for the truncation notice
-MAX_TOKENS = 2000  # keyboards stay usable without letting the map grow forever
-MAX_CHAT_LANGS = 500  # remembered languages: an LRU, for the same reason as the tokens
 
 # Command names that identify a language on their own, used to follow the user
 # when they type /lights instead of /luci. Names shared by both languages
@@ -152,136 +138,6 @@ COMMAND_LANG: dict[str, str] = {
     "run": "en",
 }
 
-# Telegram caps callback_data at 64 bytes, so buttons carry a token and the real
-# value lives here. An LRU, not a plain dict: the bot runs for months under systemd.
-# Eviction is a supported outcome -- callers already treat None as an expired session.
-_tokens: OrderedDict[str, str] = OrderedDict()
-
-
-def tok(value: str) -> str:
-    """Store a value and return a short token that fits in ``callback_data``.
-
-    Telegram caps ``callback_data`` at 64 bytes, which cannot hold a list of entity
-    ids -- a single "turn all these off" button may reference two dozen. Buttons
-    therefore carry the first 12 hex characters of the value's SHA-1, and the
-    mapping back to the real value lives in this process.
-
-    The store is an LRU capped at :data:`MAX_TOKENS`: the bot runs for months under
-    systemd, and an unbounded dictionary would only ever grow. Re-registering an
-    existing value refreshes its position rather than adding a duplicate, because
-    the key is derived from the value.
-
-    Args:
-        value: What the button should resolve to: a single entity id, several ids
-            joined by ``"|"``, or an area name.
-
-    Returns:
-        A 12-character hex token, safe to embed in ``callback_data``.
-
-    Note:
-        Eviction is not an error condition. When a token has fallen out of the
-        store, :func:`untok` returns ``None`` and the caller answers "sessione
-        scaduta", asking the user to re-issue the command -- the same path taken by
-        a button from a previous run of the process.
-    """
-    key = hashlib.sha1(value.encode()).hexdigest()[:12]
-    _tokens[key] = value
-    _tokens.move_to_end(key)
-    while len(_tokens) > MAX_TOKENS:
-        _tokens.popitem(last=False)
-    return key
-
-
-def untok(key: str) -> str | None:
-    """Resolve a token produced by :func:`tok` back to its value.
-
-    A successful lookup refreshes the entry's LRU position, so a keyboard that is
-    still being used stays alive regardless of how long ago it was rendered.
-
-    Args:
-        key: The token extracted from ``callback_data``.
-
-    Returns:
-        The stored value, or ``None`` if the token was evicted or belongs to a
-        previous run of the process. Callers must treat ``None`` as an expired
-        session, never as a bug.
-    """
-    value = _tokens.get(key)
-    if value is not None:
-        _tokens.move_to_end(key)
-    return value
-
-
-def esc(text: Any) -> str:
-    """Escape a value for Telegram's HTML parse mode.
-
-    Every message is sent with ``parse_mode=HTML``, so any text that is not markup
-    the bot itself wrote must be escaped. That includes entity names and area names
-    -- which come from Home Assistant and can legitimately contain ``&`` or ``<``
-    -- and, more importantly, the user's own query text, which is echoed back in
-    several error messages.
-
-    Args:
-        text: Any value; it is stringified first, so ``None`` and numbers are fine.
-
-    Returns:
-        The value with ``&``, ``<`` and ``>`` escaped.
-    """
-    return html.escape(str(text))
-
-
-def ha_error_text(lang: str, exc: HomeAssistantError) -> str:
-    """Render a Home Assistant failure as a localised line.
-
-    :mod:`ha_client` cannot phrase its own errors: it has no idea which chat
-    triggered the request, and therefore which of the two languages to use. It
-    raises a structured :class:`ha_client.HomeAssistantError` instead, and this is
-    where ``kind``/``status``/``detail`` become a sentence.
-
-    Args:
-        lang: Language to render in.
-        exc: The error. An exception raised by something other than the client --
-            it is typed loosely on purpose, since :func:`on_error` sees whatever
-            was raised -- falls back to its own ``str()`` as the detail.
-
-    Returns:
-        A plain sentence with no icon and no markup, meant to be interpolated into
-        ``ha_down`` or ``stt_failed`` as ``{error}``, or shown on its own in a
-        callback alert. The caller escapes it when the destination is HTML.
-    """
-    kind = getattr(exc, "kind", "generic")
-    key = f"ha_error_{kind}" if f"ha_error_{kind}" in i18n.MESSAGES else "ha_error_generic"
-    return t(lang, key, detail=getattr(exc, "detail", None) or str(exc), status=getattr(exc, "status", ""))
-
-
-def clip(text: str, lang: str = i18n.DEFAULT_LANG, limit: int = MAX_MESSAGE_CHARS) -> str:
-    """Shorten a message so Telegram will accept it, keeping the HTML valid.
-
-    Telegram rejects anything over 4096 characters, and lists such as "every light
-    in the house" or "every sensor per room" pass that on a large installation.
-    Truncating at an arbitrary offset would risk cutting a message in the middle of
-    a ``<b>`` tag and getting the whole message rejected for malformed markup, so
-    the cut is made at the last newline that fits: every line the bot emits is
-    self-contained HTML, which makes line boundaries safe cut points.
-
-    Args:
-        text: The message body, HTML included.
-        lang: Language of the truncation notice.
-        limit: Maximum length before the notice is appended. Defaults to
-            :data:`MAX_MESSAGE_CHARS`, which leaves room under Telegram's own cap
-            for the notice itself.
-
-    Returns:
-        The text unchanged when it fits, otherwise a prefix ending on a line
-        boundary followed by an italic "elenco troncato" notice. A single line
-        longer than the limit -- which the bot never produces, but which a hostile
-        entity name could -- is cut at the limit as a last resort.
-    """
-    if len(text) <= limit:
-        return text
-    cut = text.rfind("\n", 0, limit)
-    return (text[:cut] if cut > 0 else text[:limit]) + "\n" + t(lang, "truncated")
-
 
 class HassBot:
     """Stateful holder for the bot's handlers.
@@ -290,14 +146,16 @@ class HassBot:
     shared by every handler. It holds the Home Assistant client, the chat
     allow-list and the speech-to-text configuration; it deliberately holds no
     per-conversation state, so restarting the process loses nothing but the
-    callback token store.
+    callback token store in :mod:`views`.
 
     Method naming follows a strict convention:
 
     ``cmd_*``
         Bound to a Telegram command. Calls :meth:`guard` first, then delegates.
     ``on_*``
-        Bound to a non-command update (text, voice, callback query). Also guards.
+        Bound to a non-command update. Also guards. Only :meth:`on_text` lives here;
+        the voice and callback entry points are :func:`voice.on_voice` and
+        :func:`callbacks.on_callback`, which take the bot as their first argument.
     ``_*``
         Internal. Assumes authorisation has already been checked, which is what
         lets ``/accese`` and the sentence "quali luci sono accese" share
@@ -311,7 +169,7 @@ class HassBot:
             is configured or discovered; voice messages are then declined with an
             explanation.
         stt_languages: BCP-47 tag per language, e.g. ``{"it": "it-IT", "en": "en-US"}``.
-            The chat's current language picks the entry (see :meth:`on_voice`).
+            The chat's current language picks the entry (see :func:`voice.on_voice`).
         default_lang: Language for a chat that has not said anything recognisable yet.
         runnables_refresh: Seconds between two reads of the runnable catalogue;
             zero or less disables the background cycle.
@@ -658,7 +516,7 @@ class HassBot:
         """Record the language a chat is speaking, keeping the store bounded.
 
         The only writer of :attr:`chat_lang`. It is an LRU rather than a plain
-        dictionary for the same reason :func:`tok` is: the bot runs for months
+        dictionary for the same reason :func:`views.tok` is: the bot runs for months
         under systemd, and with an empty allow-list any stranger who finds it can
         otherwise add an entry per chat, forever.
 
@@ -715,7 +573,7 @@ class HassBot:
 
         The single exit point towards Telegram, which is what makes two guarantees
         hold everywhere instead of per call site: HTML parse mode is the default, and
-        the body is always run through :func:`clip` so an oversized list degrades into
+        the body is always run through :func:`views.clip` so an oversized list degrades into
         a truncated one rather than a rejected message.
 
         Args:
@@ -723,7 +581,7 @@ class HassBot:
             text: Message body, already localised by the caller through
                 :func:`i18n.t`. May contain Telegram-flavoured HTML; any
                 interpolated value that did not originate here must be passed
-                through :func:`esc`.
+                through :func:`views.esc`.
             lang: Language, used for the truncation notice.
             **kwargs: Forwarded to ``reply_text`` -- typically ``reply_markup`` for an
                 inline keyboard. ``parse_mode`` can be overridden if a caller ever
@@ -816,9 +674,9 @@ class HassBot:
         if found:
             await self.reply(
                 update,
-                self._lights_text(query, found, lang),
+                views.lights_text(query, found, lang),
                 lang,
-                reply_markup=self._lights_keyboard(found, lang),
+                reply_markup=views.lights_keyboard(found, lang),
             )
             return
         if query and not self._is_home(query) and not overview_on_miss:
@@ -826,9 +684,9 @@ class HassBot:
             return
         await self.reply(
             update,
-            self._areas_summary(lights, areas, lang),
+            views.areas_summary(lights, areas, lang),
             lang,
-            reply_markup=self._areas_keyboard(lights, areas),
+            reply_markup=views.areas_keyboard(lights, areas),
         )
 
     async def cmd_on(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -870,7 +728,7 @@ class HassBot:
         The reply carries a keyboard of the lights that are on, capped at
         :data:`MAX_BUTTONS`, so the usual follow-up ("turn that one off") is a tap
         rather than another command. The list itself is not capped -- it is text, and
-        :func:`clip` handles the extreme case.
+        :func:`views.clip` handles the extreme case.
 
         Args:
             update: The update to reply to.
@@ -883,14 +741,14 @@ class HassBot:
             return
         lines = [t(lang, "lights_on_title"), ""]
         for area, group in ent.group_by_area(on, areas).items():
-            lines.append(f"<b>{esc(self._area_name(area, lang))}</b>")
+            lines.append(f"<b>{esc(views.area_name(area, lang))}</b>")
             lines += [f"  🟡 {esc(ent.friendly_name(s))}" for s in group]
             lines.append("")
         await self.reply(
             update,
             "\n".join(lines).strip(),
             lang,
-            reply_markup=self._lights_keyboard(on[:MAX_BUTTONS], lang),
+            reply_markup=views.lights_keyboard(on[:MAX_BUTTONS], lang),
         )
 
     async def cmd_temperature(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -957,7 +815,7 @@ class HassBot:
 
         1. **No query** -- list everything runnable, with a button per entity. A
            catalogue that does not fit one Telegram message is sent as several,
-           split by :meth:`_runnables_pages`.
+           split by :func:`views.runnables_pages`.
         2. **A single entity**, when the search returns one result or the top
            result's name matches the query exactly.
         3. **Several candidates** -- a keyboard, one button each. Nothing runs until
@@ -990,8 +848,8 @@ class HassBot:
             # One message per page, each carrying the buttons for the entities it
             # names: a catalogue too big for one Telegram message is split, never
             # truncated.
-            for text, page in self._runnables_pages(runnables, lang):
-                await self.reply(update, text, lang, reply_markup=self._run_keyboard(page, lang))
+            for text, page in views.runnables_pages(runnables, lang):
+                await self.reply(update, text, lang, reply_markup=views.run_keyboard(page, lang))
             return
 
         found = ent.search(query, runnables, areas, domains=RUN_DOMAINS, limit=MAX_BUTTONS)
@@ -1005,7 +863,7 @@ class HassBot:
             update,
             t(lang, "which_to_run"),
             lang,
-            reply_markup=self._run_keyboard(found, lang),
+            reply_markup=views.run_keyboard(found, lang),
         )
 
     async def _areas_or_empty(self) -> dict[str, str]:
@@ -1051,141 +909,6 @@ class HassBot:
         await self._run_ids([entity_id])
         icon = RUN_ICONS.get(entity_id.split(".")[0], RUN_ICON_DEFAULT)
         await self.reply(update, t(lang, "result_run", icon=icon, what=esc(ent.friendly_name(target))), lang)
-
-    @staticmethod
-    def _runnable_entry(state: dict[str, Any], lang: str = i18n.DEFAULT_LANG) -> str:
-        """Render one entity as its two lines of the listing.
-
-        Args:
-            state: The entity.
-            lang: Language for the "disabled" marker.
-
-        Returns:
-            The name -- marked when it is a disabled automation, since a disabled
-            automation can still be triggered by hand and the user should know that
-            is what they are doing -- above its entity id in a code span. Both
-            values come from Home Assistant, so both are escaped.
-        """
-        entity_id = state["entity_id"]
-        off = entity_id.startswith("automation.") and not ent.is_on(state)
-        suffix = f" <i>({t(lang, 'automation_disabled')})</i>" if off else ""
-        return f"\u2022 {esc(ent.friendly_name(state))}{suffix}\n  <code>{esc(entity_id)}</code>"
-
-    @staticmethod
-    def _runnables_pages(
-        runnables: list[dict[str, Any]],
-        lang: str = i18n.DEFAULT_LANG,
-        limit: int = MAX_MESSAGE_CHARS,
-        per_page: int = MAX_BUTTONS,
-    ) -> list[tuple[str, list[dict[str, Any]]]]:
-        """Render the listing of everything that can be run, split into messages.
-
-        Grouped by domain rather than by room, which is the only grouping that means
-        anything here: a script and an automation are different kinds of thing,
-        and almost none of them are assigned to an area.
-
-        A house with a few dozen automations produces a listing past Telegram's
-        4096-character cap, and past what a single inline keyboard can usefully
-        hold. Rather than truncating it -- which is what :func:`clip` would do,
-        silently hiding half the catalogue -- the listing is split into pages, each
-        sent as its own message with its own keyboard.
-
-        A page is closed on whichever limit is reached first:
-
-        * ``limit`` characters, so Telegram accepts the message;
-        * ``per_page`` entities, so the keyboard stays usable and, more importantly,
-          so **every entity named in a page has a button in that page**. Text and
-          keyboard are built from the same list, which is what keeps them in step
-          however the catalogue is split.
-
-        A domain interrupted by a page break repeats its heading on the next page,
-        marked as a continuation, so no page opens with an unlabelled list.
-
-        Args:
-            runnables: The entities to list, already sorted by :meth:`_runnables`.
-            lang: Language for the headings.
-            limit: Character budget per page.
-            per_page: Maximum entities per page.
-
-        Returns:
-            ``[(text, entities)]``, one pair per message to send, in order. The
-            entities are exactly those named in that page's text. Never empty: a
-            caller with an empty catalogue is expected to have said so already.
-
-            At most :data:`MAX_RUN_PAGES` pages. Beyond that the listing does stop,
-            but it says so and says how many entities it did not name -- the one
-            thing :func:`clip` would not have done.
-        """
-        pages: list[tuple[str, list[dict[str, Any]]]] = []
-        lines: list[str] = [t(lang, "runnables_title"), ""]
-        shown: list[dict[str, Any]] = []
-        size = sum(len(line) + 1 for line in lines)
-
-        def flush() -> None:
-            """Close the current page; the next one starts empty."""
-            nonlocal lines, shown, size
-            if shown:
-                pages.append(("\n".join(lines), shown))
-            lines, shown, size = [], [], 0
-
-        def add(line: str) -> None:
-            """Append a line, keeping the running page length in step with it."""
-            nonlocal size
-            lines.append(line)
-            size += len(line) + 1  # the newline that will join it to the line above
-
-        for domain in RUN_DOMAINS:
-            group = [s for s in runnables if s["entity_id"].startswith(f"{domain}.")]
-            if not group:
-                continue
-            add(f"{RUN_ICONS[domain]} <b>{t(lang, f'domain_{domain}')}</b>")
-            for state in group:
-                entry = HassBot._runnable_entry(state, lang)
-                if shown and (size + len(entry) > limit or len(shown) >= per_page):
-                    flush()
-                    add(t(lang, "domain_continued", icon=RUN_ICONS[domain],
-                          domain=t(lang, f"domain_{domain}")))
-                add(entry)
-                shown.append(state)
-            add("")
-
-        add(t(lang, "run_tap_hint"))
-        flush()
-
-        if len(pages) > MAX_RUN_PAGES:
-            listed = sum(len(page) for _, page in pages[:MAX_RUN_PAGES])
-            pages = pages[:MAX_RUN_PAGES]
-            text, page = pages[-1]
-            pages[-1] = (text + "\n" + t(lang, "run_list_capped", count=len(runnables) - listed), page)
-        return pages
-
-    @staticmethod
-    def _run_keyboard(runnables: list[dict[str, Any]], lang: str = i18n.DEFAULT_LANG) -> InlineKeyboardMarkup:
-        """Build a keyboard that runs one entity per button.
-
-        Unlike :meth:`_lights_keyboard` there is no bulk button and no refresh
-        button: running everything at once is never the intent, and there is no
-        state to refresh -- a script is not something that is "on".
-
-        Args:
-            runnables: The entities to offer, capped at :data:`MAX_BUTTONS`.
-            lang: Unused today, accepted so the signature matches the other keyboard
-                builders and stays stable if a trailing button is ever added.
-
-        Returns:
-            The keyboard, one ``run:<token>`` button per entity.
-        """
-        return InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        f"{RUN_ICONS.get(s['entity_id'].split('.')[0], RUN_ICON_DEFAULT)} {ent.friendly_name(s)[:28]}",
-                        callback_data=f"run:{tok(s['entity_id'])}",
-                    )
-                ]
-                for s in runnables[:MAX_BUTTONS]
-            ]
-        )
 
     # --------------------------------------------------------------- actions
     async def _switch(self, update: Update, query: str, turn_on: bool, lang: str) -> None:
@@ -1252,14 +975,12 @@ class HassBot:
             await self._apply(update, found[:1], turn_on, lang)
             return
 
-        action = "on" if turn_on else "off"
-        rows = [
-            [InlineKeyboardButton(f"{ent.state_icon(s)} {ent.label(s, areas)}", callback_data=f"do:{action}:{tok(s['entity_id'])}")]
-            for s in found
-        ]
-        all_ids = tok("|".join(s["entity_id"] for s in found))
-        rows.append([InlineKeyboardButton(t(lang, "all_button", count=len(found)), callback_data=f"all:{action}:{all_ids}")])
-        await self.reply(update, t(lang, "which_one", verb=verb), lang, reply_markup=InlineKeyboardMarkup(rows))
+        await self.reply(
+            update,
+            t(lang, "which_one", verb=verb),
+            lang,
+            reply_markup=views.choice_keyboard(found, areas, turn_on, lang),
+        )
 
     @staticmethod
     def _bulk_targets(lights: list[dict[str, Any]], areas: dict[str, str], area: str | None = None) -> list[dict[str, Any]]:
@@ -1413,7 +1134,7 @@ class HassBot:
             if not found:
                 await self.reply(update, t(lang, "no_temp_sensors_for", query=esc(query)), lang)
                 return
-            lines = [t(lang, "temp_title", title=esc(query)), ""] + [self._sensor_line(s, areas, lang) for s in found]
+            lines = [t(lang, "temp_title", title=esc(query)), ""] + [views.sensor_line(s, areas, lang) for s in found]
             await self.reply(update, "\n".join(lines), lang)
             return
 
@@ -1425,55 +1146,23 @@ class HassBot:
             return
 
         if area:
-            lines = [t(lang, "temp_title", title=esc(area)), ""] + [self._sensor_line(s, areas, lang) for s in pool]
+            lines = [t(lang, "temp_title", title=esc(area)), ""] + [views.sensor_line(s, areas, lang) for s in pool]
         else:
             lines = [t(lang, "temp_by_room_title"), ""]
             for name, group in ent.group_by_area(pool, areas).items():
                 if name == ent.NO_AREA:
                     continue
                 lines.append(f"<b>{esc(name)}</b>")
-                lines += [f"  {self._sensor_line(s, areas, lang, short=True)}" for s in group]
+                lines += [f"  {views.sensor_line(s, areas, lang, short=True)}" for s in group]
                 lines.append("")
         await self.reply(
             update,
             "\n".join(lines).strip(),
             lang,
-            reply_markup=None if area else self._areas_keyboard(pool, areas, prefix="temp"),
+            reply_markup=None if area else views.areas_keyboard(pool, areas, prefix="temp"),
         )
 
-    def _sensor_line(self, s: dict[str, Any], areas: dict[str, str], lang: str, short: bool = False) -> str:
-        """Render one sensor or thermostat as a display line.
-
-        Args:
-            s: The entity to render.
-            areas: Mapping ``entity_id -> area name``, used for the long form.
-            lang: Language for the thermostat's target label.
-            short: When ``True``, print the bare friendly name. Used inside per-room
-                blocks, where the room is already in the heading and repeating it in
-                every line is noise.
-
-        Returns:
-            A formatted HTML line. ``climate`` entities render as
-            ``current (target, mode)`` -- with a dash when the thermostat reports no
-            current temperature, and the target omitted when it has none, which happens
-            while an integration is still initialising. Sensors render as
-            ``name: value+unit`` with a thermometer or droplet icon chosen from
-            ``device_class``.
-        """
-        attrs = s.get("attributes", {})
-        if s["entity_id"].startswith("climate."):
-            cur = attrs.get("current_temperature")
-            target = attrs.get("temperature")
-            bits = [t(lang, "target_label", value=esc(target))] if target is not None else []
-            bits.append(esc(s["state"]))
-            reading = f"{esc(cur)}°C" if cur is not None else "—"
-            return f"🎛 <b>{esc(ent.friendly_name(s))}</b>: {reading} ({', '.join(bits)})"
-        unit = attrs.get("unit_of_measurement", "")
-        icon = "💧" if attrs.get("device_class") == "humidity" else "🌡"
-        name = ent.friendly_name(s) if short else ent.label(s, areas)
-        return f"{icon} {esc(name)}: <b>{esc(s['state'])}{esc(unit)}</b>"
-
-    # ------------------------------------------------------------- keyboards
+    # ----------------------------------------------------- target resolution
     @staticmethod
     def _is_home(query: str) -> bool:
         """Decide whether a query refers to the whole house.
@@ -1493,22 +1182,6 @@ class HassBot:
             operation, which is the single most destructive thing the bot can do.
         """
         return i18n.is_home(ent.normalize(query))
-
-    @staticmethod
-    def _area_name(name: str, lang: str) -> str:
-        """Render a grouping key from :func:`entities.group_by_area` for display.
-
-        Real room names come from Home Assistant and are shown as they are; only
-        the :data:`entities.NO_AREA` sentinel needs translating.
-
-        Args:
-            name: The grouping key.
-            lang: Language to render the sentinel in.
-
-        Returns:
-            The room name, or the localised "no room" label.
-        """
-        return t(lang, "no_area") if name == ent.NO_AREA else name
 
     def _match_area(self, query: str, areas: dict[str, str]) -> str | None:
         """Match a query against the names of the rooms that exist.
@@ -1544,305 +1217,6 @@ class HassBot:
         if partial:
             log.debug("Ambiguous area for %r: %s -- falling through to entity search", query, partial)
         return None
-
-    def _areas_summary(self, lights: list[dict[str, Any]], areas: dict[str, str], lang: str) -> str:
-        """Render the "N on out of M" overview that heads the light browser.
-
-        Args:
-            lights: The lights to summarise.
-            areas: Mapping ``entity_id -> area name``.
-
-        Returns:
-            An HTML block with a house-wide total and one line per room. Unreachable
-            lights are counted in the totals but not as "on" (see
-            :func:`entities.is_on`), so a room whose lights are all unavailable shows
-            ``0/3``, which is exactly what the user should see.
-        """
-        grouped = ent.group_by_area(lights, areas)
-        total_on = sum(1 for s in lights if ent.is_on(s))
-        lines = [
-            t(lang, i18n.plural("lights_summary_title", total_on), on=total_on, total=len(lights)),
-            "",
-            t(lang, "choose_room"),
-        ]
-        for name, group in grouped.items():
-            on = sum(1 for s in group if ent.is_on(s))
-            counts = t(lang, i18n.plural("room_counts", on), on=on, total=len(group))
-            lines.append(f"• <b>{esc(self._area_name(name, lang))}</b>: {counts}")
-        return "\n".join(lines)
-
-    def _areas_keyboard(self, states: list[dict[str, Any]], areas: dict[str, str], prefix: str = "area") -> InlineKeyboardMarkup:
-        """Build a keyboard of rooms, two buttons per row.
-
-        Args:
-            states: Entities whose rooms should appear. The room list is derived from
-                what is actually present, so a room with no relevant entity is not
-                offered -- there would be nothing to show behind the button.
-            areas: Mapping ``entity_id -> area name``.
-            prefix: Callback kind, ``"area"`` to drill into lights or ``"temp"`` to
-                drill into sensors. It is what :meth:`_handle_callback` dispatches on.
-
-        Returns:
-            The keyboard. Rooms are ordered as :func:`entities.group_by_area` orders
-            them -- alphabetically, deterministically -- and :data:`entities.NO_AREA`
-            is dropped: it is not a room the user can think about.
-        """
-        names = [n for n in ent.group_by_area(states, areas) if n != ent.NO_AREA]
-        rows, row = [], []
-        for name in names:
-            row.append(InlineKeyboardButton(name, callback_data=f"{prefix}:{tok(name)}"))
-            if len(row) == 2:
-                rows.append(row)
-                row = []
-        if row:
-            rows.append(row)
-        return InlineKeyboardMarkup(rows)
-
-    def _lights_text(self, title: str, lights: list[dict[str, Any]], lang: str) -> str:
-        """Render a list of lights with their state.
-
-        Args:
-            title: Heading, typically a room name or the query that produced the list.
-                It is escaped here, so callers pass raw text.
-            lights: The lights to list, in the order they will appear on the keyboard
-                that accompanies the message.
-            lang: Language for the state words and the hint.
-
-        Returns:
-            An HTML block, one line per light, ending with the hint that tapping a
-            light toggles it.
-        """
-        lines = [f"💡 <b>{esc(title)}</b>", ""]
-        for s in lights:
-            lines.append(f"{ent.state_icon(s)} {esc(ent.friendly_name(s))} — {esc(ent.state_text(s, lang))}")
-        lines.append("\n" + t(lang, "tap_to_toggle"))
-        return "\n".join(lines)
-
-    def _lights_keyboard(self, lights: list[dict[str, Any]], lang: str = i18n.DEFAULT_LANG) -> InlineKeyboardMarkup:
-        """Build a toggle keyboard for a list of lights.
-
-        One button per light, each carrying the action *opposite* to its current state,
-        so a single tap does the obvious thing; the button label shows the current
-        state, so the keyboard also reads as a status display. Two bulk buttons and a
-        refresh button close the keyboard.
-
-        Names are cut at 28 characters to keep buttons on one line on a phone.
-
-        Args:
-            lang: Language for the three trailing buttons.
-            lights: The lights to offer. Only the first :data:`MAX_BUTTONS` are used --
-                Telegram accepts more, but a keyboard longer than that is unusable, and
-                the accompanying text lists everything anyway.
-
-        Returns:
-            The keyboard. All three trailing buttons share one token holding the ids
-            joined by ``"|"``, so bulk actions and refresh always act on exactly what
-            is displayed.
-        """
-        rows = [
-            [
-                InlineKeyboardButton(
-                    f"{ent.state_icon(s)} {ent.friendly_name(s)[:28]}",
-                    callback_data=f"do:{'off' if ent.is_on(s) else 'on'}:{tok(s['entity_id'])}",
-                )
-            ]
-            for s in lights[:MAX_BUTTONS]
-        ]
-        ids = tok("|".join(s["entity_id"] for s in lights[:MAX_BUTTONS]))
-        rows.append(
-            [
-                InlineKeyboardButton(t(lang, "turn_all_on"), callback_data=f"all:on:{ids}"),
-                InlineKeyboardButton(t(lang, "turn_all_off"), callback_data=f"all:off:{ids}"),
-            ]
-        )
-        rows.append([InlineKeyboardButton(t(lang, "refresh"), callback_data=f"refresh:{ids}")])
-        return InlineKeyboardMarkup(rows)
-
-    # ------------------------------------------------------------ callbacks
-    async def on_callback(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        """Entry point for every inline-button tap.
-
-        Authorises the query, then delegates the routing to
-        :meth:`_handle_callback`. Home Assistant failures are caught here and shown as
-        a Telegram alert rather than being left to the global error handler: a callback
-        query must be answered within seconds or the client shows a spinner until it
-        times out, and an alert is also the only place a callback failure can be made
-        visible without rewriting the message.
-        """
-        query = update.callback_query
-        lang = self.lang_of(update)
-        if not self.authorized(update):
-            await query.answer(t(lang, "unauthorized_toast"), show_alert=True)
-            return
-        data = query.data or ""
-        try:
-            await self._handle_callback(query, data, lang)
-        except HomeAssistantError as exc:
-            await query.answer(ha_error_text(lang, exc)[:190], show_alert=True)
-
-    @staticmethod
-    async def _resolve_token(query, token: str, lang: str) -> str | None:
-        """Resolve a ``callback_data`` token, answering the query when it is gone.
-
-        Every callback branch starts this way, and the failure is always handled
-        identically: a token that has fallen out of the LRU -- evicted, or left over
-        from a previous run of the process -- is a stale session, not a bug.
-
-        Args:
-            query: The ``CallbackQuery`` being handled.
-            token: The token extracted from the payload.
-            lang: Language for the alert.
-
-        Returns:
-            The stored value, or ``None`` after having already told the user the
-            session expired. A ``None`` return means the caller must simply return:
-            the query has been answered and the spinner stopped.
-        """
-        value = untok(token)
-        if value is None:
-            await query.answer(t(lang, "session_expired"), show_alert=True)
-        return value
-
-    async def _handle_callback(self, query, data: str, lang: str = i18n.DEFAULT_LANG) -> None:
-        """Route a callback query to its action.
-
-        ``callback_data`` is ``<kind>:<rest>``, where ``rest`` is one or more
-        :func:`tok` tokens:
-
-        ===================== =========================================================
-        Payload               Action
-        ===================== =========================================================
-        ``area:<t>``          Show the lights of a room, with a toggle keyboard.
-        ``temp:<t>``          Show the sensors of a room.
-        ``do:<on|off>:<t>``   Switch one entity, then re-render the message.
-        ``all:<on|off>:<t>``  Switch every entity in the token, then re-render.
-        ``refresh:<t>``       Re-read the states and re-render the message.
-        ``run:<t>``           Run one script or automation. The message is
-                              left untouched: the keyboard is a menu, not a status
-                              display, so re-rendering it would only take the other
-                              options away.
-        ===================== =========================================================
-
-        Every branch answers the query -- Telegram keeps a spinner on the button until
-        it is answered -- including the fall-through for payloads this version does not
-        recognise, which is how buttons from a previous run of the process behave.
-
-        An expired token is reported as a stale session and asks the user to re-issue
-        the command, since the ids it referred to are gone.
-
-        Args:
-            query: The ``CallbackQuery`` to act on.
-            data: Its payload, passed separately because the caller has already read it.
-            lang: Language to answer in. Button taps carry no language of their
-                own, so this is the chat's remembered preference -- the same one
-                in force when the keyboard was rendered.
-
-        Raises:
-            ha_client.HomeAssistantError: Propagated to :meth:`on_callback`, which
-                turns it into an alert.
-        """
-        kind, _, rest = data.partition(":")
-
-        if kind in ("area", "temp"):
-            area = await self._resolve_token(query, rest, lang)
-            if area is None:
-                return
-            await query.answer()
-            states, areas = await self.snapshot()
-            if kind == "temp":
-                sensors = self._temp_sensors(states, areas, area=area)
-                if sensors:
-                    lines = [t(lang, "temp_title", title=esc(area)), ""]
-                    lines += [self._sensor_line(s, areas, lang, short=True) for s in sensors]
-                    text = "\n".join(lines)
-                else:
-                    text = t(lang, "no_sensors")
-                await query.edit_message_text(clip(text, lang), parse_mode=ParseMode.HTML)
-                return
-            lights = self._lights(states, areas, area=area)
-            await query.edit_message_text(
-                clip(self._lights_text(area, lights, lang), lang),
-                parse_mode=ParseMode.HTML,
-                reply_markup=self._lights_keyboard(lights, lang),
-            )
-            return
-
-        if kind in ("do", "all"):
-            action, _, token = rest.partition(":")
-            raw = await self._resolve_token(query, token, lang)
-            if raw is None:
-                return
-            ids = raw.split("|")
-            turn_on = action == "on"
-            await self._call_on_ids(ids, turn_on)
-            toast = t(lang, "toast_on" if turn_on else "toast_off")
-            await query.answer(toast + (f" ({len(ids)})" if len(ids) > 1 else ""))
-            await self._refresh_message(query, ids, lang)
-            return
-
-        if kind == "run":
-            entity_id = await self._resolve_token(query, rest, lang)
-            if entity_id is None:
-                return
-            await self._run_ids([entity_id])
-            await query.answer(t(lang, "toast_run"))
-            return
-
-        if kind == "refresh":
-            ids_raw = await self._resolve_token(query, rest, lang)
-            if ids_raw is None:
-                return
-            await query.answer(t(lang, "toast_refreshed"))
-            await self._refresh_message(query, ids_raw.split("|"), lang)
-            return
-
-        # Payload from an older build of the bot: answer anyway so the spinner stops.
-        log.debug("Unknown callback payload: %r", data)
-        await query.answer()
-
-    async def _refresh_message(self, query, ids: list[str], lang: str = i18n.DEFAULT_LANG) -> None:
-        """Re-read the given entities and rewrite the message in place.
-
-        Called after every switch action and by the refresh button, so the keyboard the
-        user is looking at reflects the house rather than the moment the message was
-        first sent. The state cache is invalidated first: a service call that returned
-        a moment ago has already made it stale.
-
-        Entities that have disappeared from Home Assistant since the message was built
-        are dropped, and a message left with nothing to show is deliberately not
-        touched -- rewriting it into an empty list would destroy the context the user
-        was working in.
-
-        Args:
-            query: The ``CallbackQuery`` whose message should be rewritten.
-            ids: Entity ids to display, in the order they should appear.
-            lang: Language to re-render in.
-
-        Raises:
-            telegram.error.BadRequest: For any edit failure except "message is not
-                modified", which is expected whenever the new rendering is identical to
-                the old one -- tapping refresh on an unchanged house, for instance --
-                and is therefore swallowed. Every other ``BadRequest`` is a real
-                problem and is left to the global error handler.
-        """
-        self.ha.invalidate_states()
-        states, areas = await self.snapshot()
-        index = {s["entity_id"]: s for s in states}
-        shown = [index[i] for i in ids if i in index]
-        if not shown:
-            return
-        fallback = t(lang, "lights_title")
-        title = areas.get(shown[0]["entity_id"], fallback) if len(shown) > 1 else ent.friendly_name(shown[0])
-        try:
-            await query.edit_message_text(
-                clip(self._lights_text(title, shown, lang), lang),
-                parse_mode=ParseMode.HTML,
-                reply_markup=self._lights_keyboard(shown, lang),
-            )
-        except BadRequest as exc:
-            if "not modified" not in str(exc).lower():  # everything else is a real error
-                raise
-            log.debug("Identical message, edit ignored by Telegram")
 
     # ------------------------------------------------------ natural language
     async def on_text(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1911,89 +1285,6 @@ class HassBot:
         hint = t(lang, "voice_hint") if spoken else ""
         await self.reply(update, t(lang, "not_understood", text=esc(text), hint=hint), lang)
 
-    # ------------------------------------------------------- voice messages
-    async def on_voice(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        """Transcribe a voice message and execute it as if it had been typed.
-
-        Accepts voice notes, audio files and video notes. The clip is downloaded from
-        Telegram, sent to Home Assistant's speech-to-text engine, echoed back to the
-        user, and then run through the same :meth:`_dispatch_text` as typed text.
-
-        Echoing the transcription before acting is a deliberate design choice: speech
-        recognition is imperfect, and seeing "spegni la cucina" when you said "spegni
-        la camera" explains a surprising outcome instantly. The typing action shown
-        while the clip uploads is the only feedback available during what can be a
-        couple of seconds of network work.
-
-        The language handed to the engine is the chat's current one, since audio
-        carries no language of its own: a chat that has been speaking English
-        gets ``en-US``, one speaking Italian gets ``it-IT`` (see
-        :attr:`stt_languages`). To dictate in the other language, write one
-        message in it -- or run ``/language`` -- before recording.
-
-        Three refusals, each with its own explanation: no STT engine configured, a clip
-        larger than :data:`MAX_VOICE_BYTES`, or a transcription that came back empty.
-        None of them is an error -- text commands remain available throughout.
-
-        Note:
-            Transcription is charged to the configured provider, and the size cap is
-            the only thing standing between an accidental long recording and a large
-            bill, so it is enforced before the clip is downloaded.
-        """
-        if not await self.guard(update):
-            return
-        lang = self.lang_of(update)
-        message = update.effective_message
-        media = message.voice or message.audio or message.video_note
-        if media is None:
-            return
-        if not self.stt_entity:
-            await self.reply(update, t(lang, "stt_missing"), lang)
-            return
-        if getattr(media, "file_size", 0) and media.file_size > MAX_VOICE_BYTES:
-            await self.reply(update, t(lang, "voice_too_long", mb=MAX_VOICE_BYTES // (1024 * 1024)), lang)
-            return
-
-        await message.chat.send_action(ChatAction.TYPING)
-        stt_language = self.stt_languages.get(lang, self.stt_languages[i18n.DEFAULT_LANG])
-        try:
-            audio_file = await media.get_file()
-            audio = bytes(await audio_file.download_as_bytearray())
-            fmt, codec = self._audio_format(getattr(media, "mime_type", None))
-            text = await self.ha.speech_to_text(
-                audio, self.stt_entity, language=stt_language, audio_format=fmt, codec=codec
-            )
-        except HomeAssistantError as exc:
-            log.warning("STT failed (%s): %s", stt_language, exc)
-            await self.reply(update, t(lang, "stt_failed", error=esc(ha_error_text(lang, exc))), lang)
-            return
-
-        if not text:
-            await self.reply(update, t(lang, "stt_empty"), lang)
-            return
-
-        log.info("Transcribed (%s): %r", stt_language, text)
-        await self.reply(update, t(lang, "transcribed", text=esc(text)), lang)
-        await self._dispatch_text(update, text, spoken=True)
-
-    @staticmethod
-    def _audio_format(mime_type: str | None) -> tuple[str, str]:
-        """Derive the container and codec to declare for a Telegram clip.
-
-        Args:
-            mime_type: The ``mime_type`` Telegram reports, if any.
-
-        Returns:
-            A ``(format, codec)`` pair: ``("wav", "pcm")`` for a forwarded WAV file,
-            ``("ogg", "opus")`` otherwise. Ogg/Opus is what voice notes and video notes
-            always are, and it is what Home Assistant's STT providers accept natively,
-            which is why Hassgram needs no ffmpeg and no transcoding step.
-        """
-        if mime_type and "wav" in mime_type:
-            return "wav", "pcm"
-        return "ogg", "opus"
-
-
 
 async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Global error handler: turn any unhandled exception into a reply.
@@ -2004,7 +1295,7 @@ async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     that has stopped working for no reason.
 
     Home Assistant failures get a specific message including the underlying error,
-    localised by :func:`ha_error_text` -- "connection refused" and "401" tell the
+    localised by :func:`views.ha_error_text` -- "connection refused" and "401" tell the
     user immediately whether the instance is down or the token has expired -- while
     anything else gets a generic apology, since its message is not meant for users.
     The full traceback goes to the log either way.
@@ -2212,8 +1503,13 @@ def main() -> None:
     app.add_handler(CommandHandler(["stato", "state"], hass.cmd_state))
     app.add_handler(CommandHandler(["esegui", "run"], hass.cmd_run))
     app.add_handler(CommandHandler(["lingua", "language"], hass.cmd_language))
-    app.add_handler(CallbackQueryHandler(hass.on_callback))
-    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO | filters.VIDEO_NOTE, hass.on_voice))
+    app.add_handler(CallbackQueryHandler(functools.partial(callbacks.on_callback, hass)))
+    app.add_handler(
+        MessageHandler(
+            filters.VOICE | filters.AUDIO | filters.VIDEO_NOTE,
+            functools.partial(voice.on_voice, hass),
+        )
+    )
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, hass.on_text))
     app.add_error_handler(on_error)
 

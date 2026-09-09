@@ -2,23 +2,38 @@
 
 ## Module boundaries
 
-The four modules are layered, and the dependency arrows only point one way.
+The modules are layered, and the dependency arrows only point one way.
 
 ```
-       ┌──────────────────────────────────────────────┐
-       │ bot.py                                       │
-       │   Telegram handlers, keyboards, formatting   │
-       │   language resolution, voice pipeline        │
-       └────────┬──────────────┬──────────────┬───────┘
-                │              │              │
-     ┌──────────▼──────┐  ┌────▼──────────┐  ┌▼─────────────────┐
-     │ entities.py     │──▶│ i18n.py       │  │ ha_client.py     │
-     │ search, ranking,│  │ catalogue,    │  │ HTTP, caching,   │
-     │ formatting      │  │ detection,    │  │ error mapping    │
-     │ (pure, no I/O)  │  │ grammars      │  └───┬──────────────┘
-     └─────────────────┘  │ (pure, no I/O)│      │
-                          └───────────────┘      ▼
-                                        Home Assistant REST API
+                    ┌───────────────────────────────────────┐
+                    │ bot.py                                │
+                    │  bot state, command handlers, main()  │
+                    └───┬───────────┬───────────┬───────────┘
+                        │           │           │
+           ┌────────────▼──┐   ┌────▼─────┐     │
+           │ callbacks.py  │   │ voice.py │     │
+           │ button routing│   │ STT      │     │
+           └────────┬──────┘   └────┬─────┘     │
+                    │               │           │
+                    └───────────────┴───────────┤
+                                                ▼
+                                        ┌───────────────┐
+                                        │ views.py      │
+                                        │ text + inline │
+                                        │ keyboards     │
+                                        │ (pure, no I/O)│
+                                        └───┬───────────┘
+                                            │
+     ┌─────────────────┐   ┌───────────────┐│   ┌──────────────────┐
+     │ entities.py     │──▶│ i18n.py       │◀┘   │ ha_client.py     │
+     │ search, ranking,│   │ catalogue,    │     │ HTTP, caching,   │
+     │ formatting      │   │ detection,    │     │ error mapping    │
+     │ (pure, no I/O)  │   │ grammars      │     └────────┬─────────┘
+     └─────────────────┘   │ (pure, no I/O)│              │
+                           └───────────────┘              ▼
+                                              Home Assistant REST API
+
+  constants.py — Telegram limits and HA domain facts, imported by all of the above
 ```
 
 - **`i18n.py`** depends on nothing. It holds every user-facing string, the
@@ -31,9 +46,23 @@ The four modules are layered, and the dependency arrows only point one way.
 - **`ha_client.py`** knows nothing about Telegram. It is the only place that
   performs I/O and the only place that raises `HomeAssistantError` — which it
   raises *structured* (`kind`, `status`, `detail`), because it cannot know which
-  language to phrase the failure in. `bot.ha_error_text` does the phrasing.
-- **`bot.py`** depends on all three and is the only module that imports
-  `python-telegram-bot`.
+  language to phrase the failure in. `views.ha_error_text` does the phrasing.
+- **`views.py`** is the presentation layer, and it is pure in the same sense
+  `entities.py` is: it takes states and a language and returns a string or an
+  `InlineKeyboardMarkup`. It never touches bot state, which is why every
+  rendering test runs without a Telegram or a Home Assistant. It also owns `esc`,
+  `clip` and the `tok`/`untok` callback-token store.
+- **`callbacks.py`** and **`voice.py`** hold the two entry points that are not
+  commands: an inline-button tap and a voice note. Their handlers take the bot as
+  their **first argument** rather than being methods on it, so what each one needs
+  from `HassBot` is visible in the signature and the dependency stays one-way —
+  they import `bot` for typing only, and `main()` binds them to the live instance
+  with `functools.partial`.
+- **`constants.py`** holds the limits Telegram imposes and the facts about Home
+  Assistant domains. It exists so the modules above can share them without
+  importing each other.
+- **`bot.py`** owns the bot's state and its command handlers, depends on
+  everything else, and wires it all together in `main()`.
 
 ## Request flow
 
@@ -44,14 +73,14 @@ Three entry points converge on one execution path:
                                             │
 "accendi la luce dello studio" ─► on_text ──┤
                                             ├─► _dispatch_text ─► _switch ─┐
-voice note ─► on_voice ─► STT ──────────────┘                              │
+voice note ─► voice.on_voice ─► STT ────────┘                              │
                                                                            │
                                                        _apply ◄────────────┘
                                                           │
-button tap ─► on_callback ─► _handle_callback ────────────┼─► _call_on_ids
+button tap ─► callbacks.on_callback ─► callbacks.handle ───┼─► _call_on_ids
                                                           │        │
                                                           ▼        ▼
-                                              _refresh_message   HA service call
+                                        callbacks.refresh_message  HA service call
 ```
 
 Everything that changes the state of the house funnels through
@@ -204,7 +233,7 @@ unhandled exception into a message:
 - anything else → a generic apology, since its message is not meant for users.
 
 The full traceback goes to the log either way. The one place that handles errors
-locally is `on_callback`: a callback query must be answered within seconds or
+locally is `callbacks.on_callback`: a callback query must be answered within seconds or
 the client spins, so Home Assistant failures there become a Telegram alert.
 
 ## What is deliberately absent

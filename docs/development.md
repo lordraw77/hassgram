@@ -4,14 +4,25 @@
 
 | File | Role |
 |---|---|
-| [`bot.py`](../bot.py) | Telegram handlers, keyboards, formatting, natural-language parser, voice pipeline, `main()` |
+| [`bot.py`](../bot.py) | Bot state, command handlers, natural-language parser, `main()` |
+| [`views.py`](../views.py) | Every string and keyboard the bot sends, plus `esc`/`clip`/`tok`. Pure |
+| [`callbacks.py`](../callbacks.py) | Inline-button routing |
+| [`voice.py`](../voice.py) | Voice notes: transcription and its refusals |
+| [`constants.py`](../constants.py) | Telegram limits and Home Assistant domain facts |
 | [`ha_client.py`](../ha_client.py) | The only module that performs I/O; caching and error mapping |
 | [`entities.py`](../entities.py) | Pure domain layer: search, ranking, formatting. No I/O, no Telegram |
 | [`i18n.py`](../i18n.py) | Message catalogue, language detection, the two command grammars. Pure |
 
-Dependencies point one way only — `bot` → {`entities`, `ha_client`, `i18n`},
-`entities` → `i18n` — and `i18n` imports nothing of its own. Keeping that arrow
-direction is the main structural rule of the codebase.
+Dependencies point one way only — `bot` → {`callbacks`, `voice`, `views`} →
+{`entities`, `ha_client`, `i18n`, `constants`}, `entities` → `i18n` — and `i18n`
+imports nothing of its own. Keeping that arrow direction is the main structural
+rule of the codebase.
+
+`callbacks.on_callback` and `voice.on_voice` take the bot as their **first
+argument** instead of being methods on `HassBot`; `main()` binds them with
+`functools.partial`. That is what lets them live outside `bot.py` without
+importing it at runtime — and it makes what each one needs from the bot visible
+in its signature.
 
 ## Conventions
 
@@ -93,8 +104,9 @@ These fail on a mistake that would otherwise only surface in production:
 
 - **Every catalogue key used in the code exists.** `i18n.t` raises `KeyError` on
   a missing key by design, so `test_every_key_the_code_asks_for_exists` parses
-  `bot.py`, `entities.py` and `i18n.py` for `t(lang, "…")` and `plural("…", n)`
-  and checks each one against `MESSAGES`.
+  every module at the project root for `t(lang, "…")` and `plural("…", n)` and
+  checks each one against `MESSAGES`. It globs rather than reading a fixed list,
+  so splitting a module cannot silently drop half the catalogue out of the check.
 - **Every entry covers both languages and agrees on its placeholders**, and
   renders without raising.
 - **The two marker lists do not overlap.** A word in both bumps both counters,
@@ -177,15 +189,15 @@ Adding a whole language is a contained job, described in
 
 ### Adding a callback button
 
-1. Choose a `kind` string, and build the payload as `f"{kind}:{tok(value)}"` —
+1. Choose a `kind` string, and build the payload as `f"{kind}:{views.tok(value)}"` —
    never put the raw value in `callback_data`, which Telegram caps at 64 bytes.
-2. Handle the `kind` in `_handle_callback`, and make sure **every** path calls
+2. Handle the `kind` in `callbacks.handle`, and make sure **every** path calls
    `query.answer()`, or the client spins until it times out.
-3. Handle `untok()` returning `None` as an expired session, not as an error.
+3. Handle `views.untok()` returning `None` as an expired session, not as an error.
 
 ### Adding an entity domain
 
-`LIGHT_DOMAINS` controls what `/accendi` and `/spegni` can target by name.
+`constants.LIGHT_DOMAINS` controls what `/accendi` and `/spegni` can target by name.
 `_bulk_targets` separately restricts bulk operations to `light` — deliberately,
 so "spegni casa" cannot cut power to a fridge behind a smart plug. Changing the
 first without understanding the second is the kind of edit that turns a

@@ -26,7 +26,7 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY bot.py entities.py ha_client.py i18n.py ./
+COPY bot.py callbacks.py constants.py entities.py ha_client.py i18n.py views.py voice.py ./
 
 # The bot only makes outbound connections: no port to expose, no state to keep.
 RUN useradd --create-home --uid 10001 hassgram

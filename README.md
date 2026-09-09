@@ -145,7 +145,10 @@ La documentazione completa è in [docs/](docs/) (in inglese, come il codice):
 - [entities.py](entities.py) — ricerca fuzzy (nome, entity_id, stanza) e formattazione.
 - [i18n.py](i18n.py) — catalogo dei messaggi, rilevatore di lingua e le due grammatiche.
   Nessuna stringa rivolta all'utente vive fuori da qui.
-- [bot.py](bot.py) — comandi, tastiere inline, vocali e parsing del linguaggio naturale.
+- [bot.py](bot.py) — stato del bot, comandi e parsing del linguaggio naturale; il resto del
+  front end Telegram è diviso per competenza: [views.py](views.py) (testi e tastiere inline,
+  puro), [callbacks.py](callbacks.py) (tap sui bottoni), [voice.py](voice.py) (vocali) e
+  [constants.py](constants.py) (limiti Telegram e domini Home Assistant).
   Testo e vocali confluiscono nello stesso interprete (`_dispatch_text`).
   I `callback_data` sono token brevi (limite Telegram: 64 byte) risolti in una mappa LRU in memoria:
   oltre le ultime 2000 voci i token più vecchi decadono e il bot risponde «sessione scaduta».
