@@ -117,6 +117,39 @@ class TestCatalogueStructure(unittest.TestCase):
             self.assertGreater(len(re.findall(r"\|", pattern)), 10, lang)
 
 
+class TestCommandMenu(unittest.TestCase):
+    """Telegram rejects a malformed menu outright, so the shape is checked here."""
+
+    def test_every_supported_language_has_a_menu(self):
+        self.assertEqual(set(i18n.COMMAND_MENU), set(i18n.LANGS))
+
+    def test_command_names_satisfy_the_telegram_rules(self):
+        for lang, menu in i18n.COMMAND_MENU.items():
+            for name, _ in menu:
+                with self.subTest(lang=lang, command=name):
+                    self.assertRegex(name, r"^[a-z0-9_]{1,32}$")
+
+    def test_descriptions_are_plain_text_within_the_length_limit(self):
+        for lang, menu in i18n.COMMAND_MENU.items():
+            for name, description in menu:
+                with self.subTest(lang=lang, command=name):
+                    self.assertTrue(1 <= len(description) <= 256)
+                    self.assertNotIn("<", description)
+
+    def test_a_command_is_never_listed_twice_in_one_menu(self):
+        for lang, menu in i18n.COMMAND_MENU.items():
+            names = [name for name, _ in menu]
+            with self.subTest(lang=lang):
+                self.assertEqual(len(names), len(set(names)))
+
+    def test_the_two_menus_offer_the_same_features_under_different_names(self):
+        """They are parallel command sets, not translations of one set."""
+        it = [name for name, _ in i18n.COMMAND_MENU["it"]]
+        en = [name for name, _ in i18n.COMMAND_MENU["en"]]
+        self.assertEqual(len(it), len(en))
+        self.assertEqual(set(it) & set(en), set())
+
+
 class TestT(unittest.TestCase):
     def test_renders_the_requested_language(self):
         self.assertEqual(i18n.t("it", "no_sensors"), "Nessun sensore.")

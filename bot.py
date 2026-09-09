@@ -46,6 +46,16 @@ Callback payloads
     list of entity ids. Buttons therefore carry a 12-character token, resolved
     against the in-memory LRU behind :func:`tok` and :func:`untok`.
 
+Startup state
+    Two things are read once at startup and then kept: the speech-to-text engine
+    (:meth:`HassBot.discover_stt`) and the catalogue of scenes, scripts and
+    automations (:meth:`HassBot.refresh_runnables`), the latter refreshed every
+    ``RUNNABLES_REFRESH_SECONDS`` by a background task. ``/esegui`` is therefore
+    answered from memory: the catalogue reflects the user's Home Assistant
+    configuration, which changes when they edit it, not from minute to minute.
+    The command menu Telegram shows next to the text box is published at the same
+    point, from :data:`i18n.COMMAND_MENU`.
+
 Failure handling
     Handlers do not defend against Home Assistant being down. :func:`on_error`
     is registered as the global error handler and turns any unhandled
@@ -61,6 +71,7 @@ Localisation
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import html
 import logging
@@ -71,9 +82,9 @@ from collections import OrderedDict
 from typing import Any
 
 from dotenv import load_dotenv
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction, ParseMode
-from telegram.error import BadRequest
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -107,6 +118,12 @@ RUN_SERVICES: dict[str, str] = {
 RUN_DOMAINS: tuple[str, ...] = tuple(RUN_SERVICES)
 RUN_ICONS: dict[str, str] = {"scene": "\U0001f3ac", "script": "\U0001f4dc", "automation": "\u2699\ufe0f"}
 RUN_ICON_DEFAULT = "\u25b6\ufe0f"  # a domain added to RUN_SERVICES without an icon still gets a button
+
+# How often the list of scenes, scripts and automations is re-read, in seconds.
+# Unlike lights, this list is a *catalogue*: it only changes when the user edits
+# their Home Assistant configuration, so it is read once at startup and then
+# refreshed on a slow cycle instead of on every /esegui.
+RUNNABLES_REFRESH_SECONDS = 300.0
 
 MAX_BUTTONS = 24
 MAX_VOICE_BYTES = 5 * 1024 * 1024  # ~5 minutes of ogg/opus: past that it is almost certainly not a command
@@ -286,6 +303,8 @@ class HassBot:
         stt_languages: BCP-47 tag per language, e.g. ``{"it": "it-IT", "en": "en-US"}``.
             The chat's current language picks the entry (see :meth:`on_voice`).
         default_lang: Language for a chat that has not said anything recognisable yet.
+        runnables_refresh: Seconds between two reads of the runnable catalogue;
+            zero or less disables the background cycle.
         chat_lang: Remembered language per chat id, an LRU capped at
             :data:`MAX_CHAT_LANGS`. Evicting an entry costs nothing: the chat simply
             falls back to :attr:`default_lang` until it writes something the detector
@@ -298,6 +317,7 @@ class HassBot:
         stt_entity: str | None = None,
         stt_languages: dict[str, str] | None = None,
         default_lang: str = i18n.DEFAULT_LANG,
+        runnables_refresh: float = RUNNABLES_REFRESH_SECONDS,
     ) -> None:
         """Wire the bot to its dependencies.
 
@@ -312,6 +332,9 @@ class HassBot:
             stt_languages: Language tag per supported language. The provider must
                 advertise the tag or voice messages in that language are rejected.
             default_lang: Language used until a chat reveals its own.
+            runnables_refresh: Seconds between two reads of the runnable catalogue.
+                Zero or less disables the cycle, leaving the list to be read once at
+                startup and then on demand.
         """
         self.ha = ha
         self.allowed_chats = allowed_chats
@@ -319,6 +342,9 @@ class HassBot:
         self.stt_languages = stt_languages or {"it": "it-IT", "en": "en-US"}
         self.default_lang = i18n.normalize_lang(default_lang)
         self.chat_lang: OrderedDict[int, str] = OrderedDict()
+        self.runnables_refresh = runnables_refresh
+        self._runnables_cache: list[dict[str, Any]] | None = None
+        self._refresh_task: asyncio.Task | None = None
 
     async def discover_stt(self) -> None:
         """Pick a speech-to-text engine when one was not configured explicitly.
@@ -345,6 +371,107 @@ class HassBot:
             log.info("Speech-to-text: %s (languages: %s)", self.stt_entity, self.stt_languages)
         else:
             log.warning("No stt. entity in Home Assistant: voice messages will not be transcribed.")
+
+    # ------------------------------------------------- the runnable catalogue
+    async def refresh_runnables(self) -> list[dict[str, Any]]:
+        """Re-read the scenes, scripts and automations and replace the cache.
+
+        Called once from ``post_init`` and then by :meth:`_refresh_loop`.
+
+        Returns:
+            The fresh catalogue, also stored in the cache.
+
+        Raises:
+            ha_client.HomeAssistantError: If the snapshot cannot be read. The caller
+                decides what that means: fatal at startup, merely logged inside the
+                refresh loop.
+        """
+        found = self._runnables(await self.ha.states())
+        self._runnables_cache = found
+        counts = ", ".join(
+            f"{len([s for s in found if s['entity_id'].startswith(f'{d}.')])} {d}" for d in RUN_DOMAINS
+        )
+        log.info("Runnable catalogue: %s", counts)
+        return found
+
+    async def runnables(self) -> list[dict[str, Any]]:
+        """Return the runnable catalogue, reading it if the cache is empty.
+
+        ``/esegui`` goes through here rather than through :meth:`snapshot`, so the
+        menu is built from the cached catalogue instead of a live read: the list of
+        scenes and automations changes when the user edits their Home Assistant
+        configuration, not from one minute to the next.
+
+        Returns:
+            The cached catalogue. The cache is only ``None`` when the startup read
+            failed and the refresh cycle has not yet succeeded -- an unreachable
+            instance at boot, typically -- in which case one read is attempted here
+            so the command still works as soon as Home Assistant comes back.
+
+        Raises:
+            ha_client.HomeAssistantError: From the on-demand read only. A populated
+                cache never raises, which is the point: ``/esegui`` keeps answering
+                from the last known catalogue while Home Assistant is briefly down.
+
+        Note:
+            An automation enabled or disabled outside the bot keeps its old marking
+            in the listing until the next refresh. Triggering it by hand works
+            regardless, so the staleness is cosmetic.
+        """
+        if self._runnables_cache is None:
+            return await self.refresh_runnables()
+        return self._runnables_cache
+
+    def start_refreshing(self) -> None:
+        """Start the background task that keeps the catalogue current.
+
+        Called from ``post_init``, after the first read, so a house whose Home
+        Assistant is reachable at boot never waits on this task for its first
+        ``/esegui``. Does nothing when :attr:`runnables_refresh` is not positive, or
+        when a task is already running -- calling it twice is harmless.
+        """
+        if self.runnables_refresh <= 0 or (self._refresh_task and not self._refresh_task.done()):
+            return
+        self._refresh_task = asyncio.create_task(self._refresh_loop())
+
+    async def stop_refreshing(self) -> None:
+        """Cancel the refresh task and wait for it to finish.
+
+        Called from ``post_shutdown``. Awaiting the cancellation rather than merely
+        requesting it is what keeps the shutdown quiet: a task still pending when the
+        loop closes is reported as "Task was destroyed but it is pending".
+        """
+        task, self._refresh_task = self._refresh_task, None
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def _refresh_loop(self) -> None:
+        """Re-read the catalogue every :attr:`runnables_refresh` seconds, forever.
+
+        Sleeps first, since ``post_init`` has just read the catalogue.
+
+        A failed read is logged and the cycle continues with the previous catalogue
+        still in place: Home Assistant restarting must not leave the bot unable to
+        list its scenes, and there is nothing a user could do about it anyway. Any
+        other exception is logged with its traceback for the same reason -- a
+        background task that dies silently is the worst possible outcome, because
+        the catalogue would then quietly freeze for the lifetime of the process.
+        """
+        while True:
+            await asyncio.sleep(self.runnables_refresh)
+            try:
+                await self.refresh_runnables()
+            except HomeAssistantError as exc:
+                log.warning("Could not refresh the runnable catalogue: %s", exc)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 -- see the docstring: never die silently
+                log.exception("Unexpected error while refreshing the runnable catalogue")
 
     # ------------------------------------------------------------------ utils
     def authorized(self, update: Update) -> bool:
@@ -825,6 +952,12 @@ class HassBot:
            the user picks. There is deliberately no "all of them" button: firing
            every matching automation at once is never what someone meant.
 
+        The catalogue comes from :meth:`runnables` -- read at startup and refreshed
+        on a slow cycle -- not from a live snapshot: the menu is a list of things the
+        user configured, not a reading of the house, so it does not need to be
+        current to the second. The areas mapping is fetched separately because it is
+        cached for the lifetime of the process by the client.
+
         Args:
             update: The update to reply to.
             query: What to run: a scene, script or automation name. Empty lists.
@@ -835,8 +968,8 @@ class HassBot:
             both callers -- ``/esegui`` and the natural-language path -- have already
             done it.
         """
-        states, areas = await self.snapshot()
-        runnables = self._runnables(states)
+        runnables = await self.runnables()
+        areas = await self._areas_or_empty()
         if not runnables:
             await self.reply(update, t(lang, "no_runnables"), lang)
             return
@@ -863,6 +996,31 @@ class HassBot:
             lang,
             reply_markup=self._run_keyboard(found, lang),
         )
+
+    async def _areas_or_empty(self) -> dict[str, str]:
+        """Return the areas mapping, or an empty one when it cannot be read.
+
+        Only ``/esegui`` uses this. Everywhere else a missing areas mapping would
+        gut the answer -- ``/luci`` is a per-room summary -- but scenes, scripts and
+        automations are almost never assigned to a room, so for them the mapping
+        only contributes a third haystack to :func:`entities.search`. Losing it
+        degrades the fuzzy matching slightly; refusing to answer would lose the
+        whole command.
+
+        That matters because the catalogue itself is cached: without this, an
+        instance that went down after startup would still break ``/esegui`` on the
+        areas call alone, defeating the point of caching the catalogue.
+
+        Returns:
+            The mapping, or ``{}`` when Home Assistant is unreachable. The real
+            client caches it for the lifetime of the process, so this is a live call
+            only the first time.
+        """
+        try:
+            return await self.ha.areas()
+        except HomeAssistantError as exc:
+            log.warning("Areas unavailable, running the menu without them: %s", exc)
+            return {}
 
     async def _execute(self, update: Update, target: dict[str, Any], lang: str) -> None:
         """Run one entity and confirm it in the chat.
@@ -1792,12 +1950,51 @@ async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         log.debug("Could not notify the user of the error", exc_info=True)
 
 
+async def set_command_menu(app: Application) -> None:
+    """Publish the command menu Telegram shows next to the text box.
+
+    Three lists are sent: one per supported language, scoped with
+    ``language_code`` so a client set to Italian sees ``/luci`` and one set to
+    English sees ``/lights``, plus an unscoped default for every other locale,
+    which uses the bot's own :attr:`HassBot.default_lang`. The contents come from
+    :data:`i18n.COMMAND_MENU`.
+
+    Args:
+        app: The application, whose ``bot_data`` carries the :class:`HassBot`.
+
+    Note:
+        A failure here is logged and swallowed, unlike the Home Assistant check in
+        :func:`post_init`. The menu is a convenience -- every command works when
+        typed whether or not Telegram ever accepted the list -- so a rate limit or a
+        transient API error must not stop the bot from starting.
+    """
+    hass: HassBot = app.bot_data["hass"]
+
+    def menu(lang: str) -> list[BotCommand]:
+        return [BotCommand(name, description) for name, description in i18n.COMMAND_MENU[lang]]
+
+    try:
+        await app.bot.set_my_commands(menu(hass.default_lang))
+        for lang in i18n.COMMAND_MENU:
+            await app.bot.set_my_commands(menu(lang), language_code=lang)
+    except TelegramError as exc:
+        log.warning("Could not publish the command menu: %s", exc)
+    else:
+        log.info("Command menu published for: %s", ", ".join(i18n.COMMAND_MENU))
+
+
 async def post_init(app: Application) -> None:
     """Startup hook: verify Home Assistant and choose a transcription engine.
 
     Runs after the ``Application`` is built but before polling starts, so a bad URL
     or a revoked token stops the process immediately with a clear log message
     instead of surfacing later as commands that mysteriously do nothing.
+
+    Four steps, in order: ping Home Assistant, pick a speech-to-text engine, read
+    the runnable catalogue once and start the cycle that keeps it current, then
+    publish the command menu. The catalogue is read here rather than on the first
+    ``/esegui`` so that the very first use of the command is as fast as every
+    later one.
 
     Args:
         app: The application, whose ``bot_data`` carries the :class:`HassBot`.
@@ -1806,21 +2003,30 @@ async def post_init(app: Application) -> None:
         ha_client.HomeAssistantError: If the instance is unreachable or rejects the
             token. Failing here is intentional; under systemd the unit restarts and
             retries, which is the desired behaviour when the bot boots before Home
-            Assistant does.
+            Assistant does. The command menu is the one step allowed to fail
+            quietly -- see :func:`set_command_menu`.
     """
     bot: HassBot = app.bot_data["hass"]
     msg = await bot.ha.ping()
     log.info("Home Assistant: %s", msg)
     await bot.discover_stt()
+    await bot.refresh_runnables()
+    bot.start_refreshing()
+    await set_command_menu(app)
 
 
 async def post_shutdown(app: Application) -> None:
     """Shutdown hook: close the Home Assistant HTTP session.
 
+    Stops the catalogue refresh task before closing the session, so the task cannot
+    wake up to find the client already gone.
+
     Args:
         app: The application, whose ``bot_data`` carries the :class:`HassBot`.
     """
-    await app.bot_data["hass"].ha.aclose()
+    hass: HassBot = app.bot_data["hass"]
+    await hass.stop_refreshing()
+    await hass.ha.aclose()
 
 
 def main() -> None:
@@ -1846,6 +2052,10 @@ def main() -> None:
                                             default ``it-IT``.
     ``STT_LANGUAGE_EN``                     Transcription tag for English,
                                             default ``en-US``.
+    ``RUNNABLES_REFRESH_SECONDS``           How often the scene, script and
+                                            automation catalogue is re-read.
+                                            Default 300; ``0`` disables the
+                                            cycle and reads it once at startup.
     ======================================= ====================================
 
     Chat ids are extracted with a regular expression rather than split on commas,
@@ -1885,6 +2095,15 @@ def main() -> None:
         "en": os.getenv("STT_LANGUAGE_EN") or "en-US",
     }
 
+    # An unparsable value is a typo, not a reason to refuse to start: the catalogue
+    # simply falls back to the default cycle, and the log says so.
+    raw_refresh = os.getenv("RUNNABLES_REFRESH_SECONDS")
+    try:
+        refresh = float(raw_refresh) if raw_refresh else RUNNABLES_REFRESH_SECONDS
+    except ValueError:
+        log.warning("RUNNABLES_REFRESH_SECONDS=%r is not a number, using %s", raw_refresh, RUNNABLES_REFRESH_SECONDS)
+        refresh = RUNNABLES_REFRESH_SECONDS
+
     ha = HomeAssistantClient(ha_url, ha_token)
     hass = HassBot(
         ha,
@@ -1892,6 +2111,7 @@ def main() -> None:
         stt_entity=os.getenv("HA_STT_ENTITY") or None,
         stt_languages=stt_languages,
         default_lang=os.getenv("BOT_LANGUAGE", i18n.DEFAULT_LANG),
+        runnables_refresh=refresh,
     )
 
     app = Application.builder().token(token).post_init(post_init).post_shutdown(post_shutdown).build()

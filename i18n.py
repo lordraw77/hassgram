@@ -300,6 +300,42 @@ MESSAGES: dict[str, dict[str, str]] = {
 }
 
 
+# The command menu Telegram shows next to the text box, per language. Kept here
+# with the rest of the user-facing text, and kept as data rather than as
+# MESSAGES entries because a menu is an ordered list of (name, description)
+# pairs, not a lookup: the order is the order the user sees.
+#
+# The Italian and English menus list *different command names*, not translations
+# of the same ones -- /luci and /lights are both registered, and the name the
+# user picks is itself a language signal (see bot.COMMAND_LANG). Descriptions
+# are plain text: Telegram renders no markup here and caps them at 256
+# characters.
+COMMAND_MENU: dict[str, tuple[tuple[str, str], ...]] = {
+    "it": (
+        ("luci", "Stanze e luci, con i bottoni"),
+        ("accese", "Tutto quello che è acceso adesso"),
+        ("accendi", "Accendi una luce, una stanza o casa"),
+        ("spegni", "Spegni una luce, una stanza o casa"),
+        ("esegui", "Esegui una scena, uno script o un'automazione"),
+        ("temperatura", "Temperature e umidità, per stanza"),
+        ("stato", "Stato di una qualsiasi entità"),
+        ("lingua", "Cambia lingua: it o en"),
+        ("aiuto", "Elenco dei comandi"),
+    ),
+    "en": (
+        ("lights", "Rooms and lights, with buttons"),
+        ("whatson", "Everything that is on right now"),
+        ("on", "Turn on a light, a room or the house"),
+        ("off", "Turn off a light, a room or the house"),
+        ("run", "Run a scene, script or automation"),
+        ("temperature", "Temperature and humidity, per room"),
+        ("state", "State of any entity"),
+        ("language", "Switch language: it or en"),
+        ("help", "List of commands"),
+    ),
+}
+
+
 def plural(key: str, count: int) -> str:
     """Pick the singular or plural variant of a catalogue key.
 

@@ -7,15 +7,17 @@ for. Nothing here needs a network, a token or an event loop of its own.
 
 from __future__ import annotations
 
+import asyncio
 import types
 import unittest
 from unittest import mock
 
-from telegram.error import BadRequest
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import CallbackQueryHandler, CommandHandler, MessageHandler
 
 from tests.fakes import (
-    AREAS, FakeHA, FakeQuery, FakeUpdate, FakeVoice, buttons, context, house, payloads,
+    AREAS, FakeBot, FakeHA, FakeQuery, FakeUpdate, FakeVoice, app as fake_app, buttons,
+    context, house, payloads,
 )
 
 import bot
@@ -755,23 +757,70 @@ class ErrorHandlerTest(BotTestCase):
 
 class LifecycleTest(BotTestCase):
     async def test_post_init_pings_and_discovers(self):
-        b = make_bot()
-        app = types.SimpleNamespace(bot_data={"hass": b})
+        b = make_bot(runnables_refresh=0)
+        with self.assertLogs("hassgram", level="INFO"):
+            await bot.post_init(fake_app(b))
+        self.assertEqual(b.stt_entity, "stt.whisper")
+
+    async def test_post_init_reads_the_runnable_catalogue_once(self):
+        b = make_bot(runnables_refresh=0)
+        with self.assertLogs("hassgram", level="INFO"):
+            await bot.post_init(fake_app(b))
+        self.assertEqual(
+            [s["entity_id"] for s in await b.runnables()],
+            ["scene.cinema", "script.buonanotte", "automation.risveglio", "automation.vacanza"],
+        )
+
+    async def test_post_init_starts_and_post_shutdown_stops_the_refresh_cycle(self):
+        b = make_bot(runnables_refresh=30)
+        with self.assertLogs("hassgram", level="INFO"):
+            await bot.post_init(fake_app(b))
+        self.assertIsNotNone(b._refresh_task)
+        await bot.post_shutdown(fake_app(b))
+        self.assertIsNone(b._refresh_task)
+
+    async def test_post_init_publishes_a_command_menu_per_language(self):
+        b = make_bot(runnables_refresh=0)
+        app = fake_app(b)
         with self.assertLogs("hassgram", level="INFO"):
             await bot.post_init(app)
-        self.assertEqual(b.stt_entity, "stt.whisper")
+        codes = [code for code, _ in app.bot.command_menus]
+        self.assertEqual(codes, [None, "it", "en"])
+
+    async def test_the_command_menu_offers_esegui_and_run(self):
+        b = make_bot(runnables_refresh=0)
+        app = fake_app(b)
+        with self.assertLogs("hassgram", level="INFO"):
+            await bot.post_init(app)
+        by_code = dict(app.bot.command_menus)
+        self.assertIn("esegui", [name for name, _ in by_code["it"]])
+        self.assertIn("run", [name for name, _ in by_code["en"]])
+
+    async def test_the_default_menu_follows_the_bot_language(self):
+        b = make_bot(runnables_refresh=0, default_lang="en")
+        app = fake_app(b)
+        with self.assertLogs("hassgram", level="INFO"):
+            await bot.post_init(app)
+        self.assertEqual(dict(app.bot.command_menus)[None], dict(app.bot.command_menus)["en"])
+
+    async def test_a_rejected_command_menu_does_not_stop_the_bot(self):
+        b = make_bot(runnables_refresh=0)
+        app = fake_app(b, bot=FakeBot(fail_with=TelegramError("flood")))
+        with self.assertLogs("hassgram", level="WARNING") as logs:
+            await bot.post_init(app)
+        self.assertIn("command menu", " ".join(logs.output))
 
     async def test_post_init_fails_loudly_on_an_unreachable_instance(self):
         b = make_bot(ha=FakeHA(fail_with=HomeAssistantError("refused", kind="network")))
-        app = types.SimpleNamespace(bot_data={"hass": b})
         with self.assertRaises(HomeAssistantError):
-            await bot.post_init(app)
+            await bot.post_init(fake_app(b))
 
     async def test_post_shutdown_closes_the_session(self):
         closed = []
         b = make_bot()
         b.ha.aclose = lambda: closed.append(True) or _done()
-        await bot.post_shutdown(types.SimpleNamespace(bot_data={"hass": b}))
+        await bot.post_shutdown(fake_app(b))
+        self.assertEqual(closed, [True])
 
 
 async def _done():
@@ -913,6 +962,86 @@ class RunCommandTest(BotTestCase):
         self.assertEqual(self.b.ha.calls, [("script", "turn_on", ["script.buonanotte"])])
 
 
+# ------------------------------------------------ the runnable catalogue cache
+class RunnablesCacheTest(BotTestCase):
+    """The catalogue is read at startup and refreshed on a cycle, not per command."""
+
+    async def test_esegui_answers_from_the_cache_without_reading_states(self):
+        b = make_bot(runnables_refresh=0)
+        await b.refresh_runnables()
+        reads = b.ha.state_reads
+        await b.cmd_run(FakeUpdate(), context([]))
+        await b.cmd_run(FakeUpdate(), context(["cinema"]))
+        self.assertEqual(b.ha.state_reads, reads)
+        self.assertEqual(b.ha.area_reads, 1)  # rendered once, then cached by the client
+
+    async def test_a_cold_cache_is_filled_on_demand(self):
+        """The startup read can have failed; the command must still work."""
+        b = make_bot(runnables_refresh=0)
+        update = FakeUpdate()
+        await b.cmd_run(update, context([]))
+        self.assertEqual(b.ha.state_reads, 1)
+        self.assertIn("Cinema", update.effective_message.last)
+
+    async def test_the_menu_still_lists_while_home_assistant_is_down(self):
+        """The point of caching: the catalogue outlives the instance being reachable."""
+        b = make_bot(runnables_refresh=0)
+        await b.refresh_runnables()
+        b.ha.fail_with = HomeAssistantError("refused", kind="network")
+        update = FakeUpdate()
+        with self.assertLogs("hassgram", level="WARNING"):  # areas unavailable
+            await b.cmd_run(update, context([]))
+        self.assertIn("Cinema", update.effective_message.last)
+
+    async def test_running_while_home_assistant_is_down_still_fails_loudly(self):
+        """Listing degrades gracefully; executing must not pretend to have worked."""
+        b = make_bot(runnables_refresh=0)
+        await b.refresh_runnables()
+        b.ha.fail_with = HomeAssistantError("refused", kind="network")
+        with self.assertLogs("hassgram", level="WARNING"), \
+             self.assertRaises(HomeAssistantError):
+            await b.cmd_run(FakeUpdate(), context(["cinema"]))
+        self.assertEqual(b.ha.calls, [])
+
+    async def test_a_refresh_picks_up_a_newly_created_scene(self):
+        b = make_bot(runnables_refresh=0)
+        await b.refresh_runnables()
+        b.ha._states = house() + [
+            {"entity_id": "scene.festa", "state": "unknown", "attributes": {"friendly_name": "Festa"}},
+        ]
+        self.assertNotIn("scene.festa", [s["entity_id"] for s in await b.runnables()])
+        await b.refresh_runnables()
+        self.assertIn("scene.festa", [s["entity_id"] for s in await b.runnables()])
+
+    async def test_the_cycle_refreshes_and_survives_a_failed_read(self):
+        b = make_bot(runnables_refresh=0.01)
+        await b.refresh_runnables()
+        b.ha.fail_with = HomeAssistantError("refused", kind="network")
+        b.start_refreshing()
+        with self.assertLogs("hassgram", level="WARNING") as logs:
+            await asyncio.sleep(0.05)
+        await b.stop_refreshing()
+        self.assertIn("refresh", " ".join(logs.output))
+        # The previous catalogue is still there: a failed read never empties it.
+        self.assertEqual(len(await b.runnables()), 4)
+
+    async def test_a_zero_interval_starts_no_cycle(self):
+        b = make_bot(runnables_refresh=0)
+        b.start_refreshing()
+        self.assertIsNone(b._refresh_task)
+
+    async def test_starting_twice_leaves_one_task(self):
+        b = make_bot(runnables_refresh=30)
+        b.start_refreshing()
+        first = b._refresh_task
+        b.start_refreshing()
+        self.assertIs(b._refresh_task, first)
+        await b.stop_refreshing()
+
+    async def test_stopping_a_cycle_that_never_started_is_harmless(self):
+        await make_bot(runnables_refresh=0).stop_refreshing()
+
+
 # ------------------------------------------------------------------- wiring
 class FakeApp:
     def __init__(self):
@@ -987,6 +1116,25 @@ class MainTest(unittest.TestCase):
                      "temperatura", "temperature", "stato", "state", "lingua", "language",
                      "start", "help", "aiuto", "esegui", "run"):
             self.assertIn(name, commands, name)
+
+    def test_every_command_in_the_menu_is_actually_registered(self):
+        """A menu entry with no handler is a button that does nothing."""
+        with self.assertLogs("hassgram", level="INFO"):
+            app = self.run_main({**self.BASE, "TELEGRAM_CHAT_ID": "42"})
+        commands = {c for h in app.handlers if isinstance(h, CommandHandler) for c in h.commands}
+        for lang, menu in i18n.COMMAND_MENU.items():
+            for name, _ in menu:
+                with self.subTest(lang=lang, command=name):
+                    self.assertIn(name, commands)
+
+    def test_the_refresh_interval_can_be_configured_and_tolerates_a_typo(self):
+        with self.assertLogs("hassgram", level="INFO"):
+            app = self.run_main({**self.BASE, "TELEGRAM_CHAT_ID": "42", "RUNNABLES_REFRESH_SECONDS": "60"})
+        self.assertEqual(app.bot_data["hass"].runnables_refresh, 60.0)
+        with self.assertLogs("hassgram", level="WARNING") as logs:
+            app = self.run_main({**self.BASE, "TELEGRAM_CHAT_ID": "42", "RUNNABLES_REFRESH_SECONDS": "presto"})
+        self.assertEqual(app.bot_data["hass"].runnables_refresh, bot.RUNNABLES_REFRESH_SECONDS)
+        self.assertIn("RUNNABLES_REFRESH_SECONDS", " ".join(logs.output))
 
     def test_every_command_name_that_identifies_a_language_is_registered(self):
         with self.assertLogs("hassgram", level="INFO"):

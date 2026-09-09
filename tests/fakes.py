@@ -116,6 +116,8 @@ class FakeHA:
     Attributes:
         calls: ``(domain, service, entity_ids)`` per :meth:`call_service`.
         state_reads: How many times :meth:`states` was called.
+        area_reads: How many times the areas were actually rendered, as opposed to
+            served from the cache.
         invalidations: How many times the cache was dropped.
         fail_with: When set, every method raises it instead of answering.
     """
@@ -123,8 +125,10 @@ class FakeHA:
     def __init__(self, states=None, areas=None, fail_with=None):
         self._states = states if states is not None else house()
         self._areas = AREAS if areas is None else areas
+        self._areas_cache: dict[str, str] | None = None
         self.calls: list[tuple[str, str, Any]] = []
         self.state_reads = 0
+        self.area_reads = 0
         self.invalidations = 0
         self.fail_with = fail_with
         self.stt_calls: list[dict[str, Any]] = []
@@ -140,8 +144,16 @@ class FakeHA:
         return self._states
 
     async def areas(self):
-        self._boom()
-        return self._areas
+        """Cached after the first call, as the real client caches it forever.
+
+        Modelled rather than simplified because the bot leans on it: /esegui reads
+        the areas on every invocation and must not go near the network to do so.
+        """
+        if self._areas_cache is None:
+            self._boom()
+            self.area_reads += 1
+            self._areas_cache = self._areas
+        return self._areas_cache
 
     async def call_service(self, domain, service, data):
         self._boom()
@@ -260,6 +272,30 @@ class FakeQuery:
     @property
     def last_edit(self) -> str:
         return self.edits[-1][0]
+
+
+class FakeBot:
+    """The one Telegram API method the lifecycle hooks call, plus its failure mode.
+
+    Attributes:
+        command_menus: ``(language_code, [(name, description), ...])`` per
+            :meth:`set_my_commands`; ``None`` as the code is the unscoped default.
+        fail_with: When set, every call raises it instead of recording.
+    """
+
+    def __init__(self, fail_with=None):
+        self.command_menus: list[tuple[str | None, list[tuple[str, str]]]] = []
+        self.fail_with = fail_with
+
+    async def set_my_commands(self, commands, language_code=None, **kwargs):
+        if self.fail_with is not None:
+            raise self.fail_with
+        self.command_menus.append((language_code, [(c.command, c.description) for c in commands]))
+
+
+def app(hass, bot=None):
+    """The shape of an ``Application`` the lifecycle hooks actually use."""
+    return types.SimpleNamespace(bot_data={"hass": hass}, bot=bot if bot is not None else FakeBot())
 
 
 def context(args=None, error=None, bot_data=None):

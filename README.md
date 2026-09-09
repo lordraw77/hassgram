@@ -21,6 +21,7 @@ Le credenziali sono lette da `.env` (già presente):
 | `BOT_LANGUAGE` | *(opzionale)* lingua iniziale di una chat nuova, `it` o `en`. Default `it` |
 | `STT_LANGUAGE_IT` | *(opzionale)* lingua dei vocali italiani, default `it-IT`. `STT_LANGUAGE` resta accettato come sinonimo |
 | `STT_LANGUAGE_EN` | *(opzionale)* lingua dei vocali inglesi, default `en-US` |
+| `RUNNABLES_REFRESH_SECONDS` | *(opzionale)* ogni quanto rileggere scene, script e automazioni. Default `300`; `0` disattiva il ciclo e legge solo all'avvio |
 
 ## Avvio
 
@@ -55,7 +56,9 @@ niente Home Assistant. Dettagli in [docs/development.md](docs/development.md#tes
 | `/lingua it\|en` | fissa la lingua della chat (`/language` è lo stesso comando) |
 
 Ogni comando ha un alias inglese: `/lights`, `/whatson`, `/on`, `/off`,
-`/temperature`, `/state`, `/run`, `/language`. **Il nome che usi è già un segnale di
+`/temperature`, `/state`, `/run`, `/language`. All'avvio il bot pubblica il
+**menu comandi di Telegram** (quello che compare digitando `/`) in entrambe le
+lingue: un client impostato in italiano vede `/luci`, uno in inglese `/lights`. **Il nome che usi è già un segnale di
 lingua**: `/luci` risponde in italiano, `/lights` in inglese.
 
 **«casa» vale come tutte le stanze insieme** — valgono anche *tutto*, *tutta la casa*, *tutte le stanze*,
@@ -72,6 +75,11 @@ Funziona anche in linguaggio naturale: *«accendi la luce dello studio»*, *«sp
 ogni dominio: `scene.turn_on` per una scena, `script.turn_on` per uno script e `automation.trigger` per
 un'automazione — non `automation.turn_on`, che si limiterebbe ad *abilitarla* senza eseguirla.
 Un'automazione disattivata resta eseguibile a mano ed è segnalata come tale nell'elenco.
+L'elenco viene **letto all'avvio e poi rinfrescato a ciclo** (`RUNNABLES_REFRESH_SECONDS`, default 300 s):
+`/esegui` risponde dalla memoria, quindi il menu resta disponibile anche se Home Assistant è
+momentaneamente irraggiungibile — è l'esecuzione vera e propria a fallire, non l'elenco.
+Il rovescio della medaglia: se abiliti o disabiliti un'automazione da Home Assistant, l'indicazione
+nell'elenco si aggiorna al giro successivo.
 Scene, script e automazioni non fanno mai parte di `/accendi`, `/spegni` o `/luci`: «spegni casa» non può
 raggiungerle.
 

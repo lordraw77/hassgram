@@ -55,6 +55,7 @@ unprivileged user (uid 10001).
 | `HA_STT_ENTITY` | no | speech-to-text entity, e.g. `stt.google_ai_stt`. Autodetected when unset |
 | `STT_LANGUAGE_IT` | no | language tag for Italian voice notes (default `it-IT`) |
 | `STT_LANGUAGE_EN` | no | language tag for English voice notes (default `en-US`) |
+| `RUNNABLES_REFRESH_SECONDS` | no | how often the scene/script/automation catalogue is re-read (default `300`; `0` reads it once at startup) |
 
 Get the access token from your Home Assistant profile page → Security →
 Long-lived access tokens. Get your chat id by messaging the bot and reading the
@@ -79,7 +80,11 @@ log line it prints for unauthorised chats.
 `/run` is the only command that *starts* something rather than switching it, and
 it picks the right service per domain: `scene.turn_on`, `script.turn_on` and
 `automation.trigger` — not `automation.turn_on`, which would merely enable the
-automation without running it.
+automation without running it. The catalogue it offers is read at startup and
+refreshed on a cycle, so the menu answers from memory.
+
+The commands above are also published to Telegram's own command menu at startup,
+in Italian and in English, so they show up as you type `/`.
 
 Every command has an Italian alias: `/luci`, `/accese`, `/accendi`, `/spegni`,
 `/temperatura`, `/stato`, `/esegui`, `/lingua`. **The name you use is itself a language
